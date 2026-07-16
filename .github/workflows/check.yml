@@ -46,7 +46,7 @@ jobs:
           shared-key: afterburner-ir
 
       - name: Test IR invariants
-        run: cargo test --locked --package afterburner --test ir
+        run: cargo test --locked --package afterburner
 
       - name: Lint AfterBurner
         run: cargo clippy --locked --package afterburner --all-targets -- -D warnings

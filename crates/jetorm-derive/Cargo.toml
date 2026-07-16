@@ -1,0 +1,22 @@
+[package]
+name = "jetorm-derive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM derive macros"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_derive"
+path = "src/lib.rs"
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

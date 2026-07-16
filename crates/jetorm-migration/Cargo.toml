@@ -1,0 +1,19 @@
+[package]
+name = "jetorm-migration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM migration runtime and history replay"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_migration"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+jetorm-schema.workspace = true

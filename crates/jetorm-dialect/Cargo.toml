@@ -1,0 +1,23 @@
+[package]
+name = "jetorm-dialect"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM SQL dialect rendering from AfterBurner IR"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_dialect"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+afterburner.workspace = true
+
+[dev-dependencies]
+jetorm-entity.workspace = true
+jetorm-query.workspace = true

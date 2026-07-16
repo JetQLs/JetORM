@@ -1,0 +1,20 @@
+[package]
+name = "jetorm-query"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM typed query builder and AfterBurner IR lowering"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_query"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+afterburner.workspace = true
+jetorm-entity.workspace = true

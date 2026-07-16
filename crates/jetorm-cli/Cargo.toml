@@ -1,0 +1,20 @@
+[package]
+name = "jetorm-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM command-line and terminal interface"
+license = "Apache-2.0"
+
+[[bin]]
+name = "jet"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+jetorm-migration.workspace = true
+jetorm-schema.workspace = true

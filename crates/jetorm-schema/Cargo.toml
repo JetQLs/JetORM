@@ -1,0 +1,19 @@
+[package]
+name = "jetorm-schema"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM abstract schema model and diff engine"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_schema"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+jetorm-entity.workspace = true

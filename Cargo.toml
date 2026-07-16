@@ -16,6 +16,15 @@ module_inception = "allow"
 
 [workspace.dependencies]
 # Internal crates
+afterburner = { path = "crates/afterburner" }
+jetorm-entity = { path = "crates/jetorm-entity" }
+jetorm-derive = { path = "crates/jetorm-derive" }
+jetorm-query = { path = "crates/jetorm-query" }
+jetorm-dialect = { path = "crates/jetorm-dialect" }
+jetorm-executor = { path = "crates/jetorm-executor" }
+jetorm-schema = { path = "crates/jetorm-schema" }
+jetorm-migration = { path = "crates/jetorm-migration" }
+jetorm = { path = "crates/jetorm" }
 
 # External dependencies
 tokio = { version = "1.52.3", features = ["full"] }
@@ -29,3 +38,6 @@ chrono-tz = "0.10.4"
 uuid = { version = "1.23.4", features = ["v7", "v4"] }
 rand = "0.10.1"
 strum = { version = "0.28.0", features = ["derive"] }
+proc-macro2 = "1.0.106"
+quote = "1.0.46"
+syn = { version = "2.0.118", features = ["full"] }

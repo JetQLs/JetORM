@@ -1,0 +1,21 @@
+[package]
+name = "jetorm-entity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM entity metadata traits and value model"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_entity"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

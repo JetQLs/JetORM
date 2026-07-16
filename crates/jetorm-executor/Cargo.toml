@@ -1,0 +1,20 @@
+[package]
+name = "jetorm-executor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM connection, transaction, and statement execution layer"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm_executor"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+jetorm-dialect.workspace = true
+jetorm-entity.workspace = true

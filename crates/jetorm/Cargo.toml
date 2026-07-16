@@ -1,0 +1,28 @@
+[package]
+name = "jetorm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM, a typed async ORM built on the AfterBurner query optimizer"
+license = "Apache-2.0"
+
+[lib]
+name = "jetorm"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+afterburner.workspace = true
+jetorm-derive.workspace = true
+jetorm-dialect.workspace = true
+jetorm-entity.workspace = true
+jetorm-query.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

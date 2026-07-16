@@ -1,0 +1,96 @@
+use syn::{Attribute, DeriveInput, Field, LitStr, Path};
+
+/// Container-level configuration parsed from `#[jet(...)]` attributes.
+pub struct ContainerAttrs {
+    pub table: String,
+    pub schema: Option<String>,
+    pub module: Option<String>,
+    pub crate_path: Path,
+}
+
+/// Field-level configuration parsed from `#[jet(...)]` attributes.
+#[derive(Default)]
+pub struct FieldAttrs {
+    pub column: Option<String>,
+    pub primary_key: bool,
+    pub auto_increment: bool,
+    pub unique: bool,
+}
+
+pub fn parse_container(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
+    let mut table = None;
+    let mut schema = None;
+    let mut module = None;
+    let mut crate_path = None;
+
+    for attribute in jet_attributes(&input.attrs) {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("table") {
+                table = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
+            } else if meta.path.is_ident("schema") {
+                schema = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
+            } else if meta.path.is_ident("module") {
+                module = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
+            } else if meta.path.is_ident("crate_path") {
+                let literal = meta.value()?.parse::<LitStr>()?;
+                crate_path = Some(literal.parse::<Path>()?);
+                Ok(())
+            } else {
+                Err(meta.error("unknown container attribute; expected `table`, `schema`, `module`, or `crate_path`"))
+            }
+        })?;
+    }
+
+    let Some(table) = table else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "`#[derive(JetModel)]` requires `#[jet(table = \"...\")]`",
+        ));
+    };
+    let crate_path = match crate_path {
+        Some(path) => path,
+        None => syn::parse_str::<Path>("::jetorm")?,
+    };
+
+    Ok(ContainerAttrs {
+        table,
+        schema,
+        module,
+        crate_path,
+    })
+}
+
+pub fn parse_field(field: &Field) -> syn::Result<FieldAttrs> {
+    let mut attrs = FieldAttrs::default();
+
+    for attribute in jet_attributes(&field.attrs) {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("column") {
+                attrs.column = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
+            } else if meta.path.is_ident("primary_key") {
+                attrs.primary_key = true;
+                Ok(())
+            } else if meta.path.is_ident("auto_increment") {
+                attrs.auto_increment = true;
+                Ok(())
+            } else if meta.path.is_ident("unique") {
+                attrs.unique = true;
+                Ok(())
+            } else {
+                Err(meta.error("unknown field attribute; expected `column`, `primary_key`, `auto_increment`, or `unique`"))
+            }
+        })?;
+    }
+
+    Ok(attrs)
+}
+
+fn jet_attributes(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
+    attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("jet"))
+}

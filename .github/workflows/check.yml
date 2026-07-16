@@ -27,3 +27,31 @@ jobs:
 
       - name: Format
         run: cargo fmt --all -- --check
+
+  ir-integrity:
+    name: IR Integrity
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.96.0
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: afterburner-ir
+
+      - name: Test IR invariants
+        run: cargo test --locked --package afterburner --test ir
+
+      - name: Lint AfterBurner
+        run: cargo clippy --locked --package afterburner --all-targets -- -D warnings
+
+      - name: Verify IR documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --package afterburner --no-deps

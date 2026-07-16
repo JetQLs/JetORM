@@ -1,0 +1,18 @@
+[package]
+name = "afterburner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "JetORM Optimizer"
+license = "Apache-2.0"
+
+[lib]
+name = "afterburner"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,28 @@
+# Manually managed development database.
+#
+# Live tests do NOT use this file: they start isolated disposable containers
+# per test through `testcontainers` (see crates/jetorm-executor/tests/).
+# This stack exists for interactive exploration — `just db-up`, poke at a
+# real server with psql or ad-hoc queries, `just db-down`.
+#
+# Data lives on tmpfs: every `up` starts from an empty server.
+name: jetorm-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: jetorm
+      POSTGRES_PASSWORD: jetorm
+      POSTGRES_DB: jetorm_dev
+    ports:
+      - "54329:5432"
+    # PG18 stores data in a subdirectory of /var/lib/postgresql and refuses a
+    # mount at /var/lib/postgresql/data, so the tmpfs covers the parent.
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jetorm -d jetorm_dev"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

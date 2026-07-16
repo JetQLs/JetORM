@@ -46,6 +46,10 @@ pub use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue, TableMeta, Value,
     ValueTypeMismatch,
 };
+#[cfg(feature = "executor")]
+pub use jetorm_executor::{
+    Database, ExecuteError, Executor, PlanCache, SelectExecute, Transaction,
+};
 pub use jetorm_query::{
     ColumnExt, EntityQuery, Expr, LoweringError, OrderKey, Select, TextColumnExt,
 };
@@ -56,4 +60,6 @@ pub mod prelude {
         Column, ColumnExt, Entity, EntityQuery, Expr, JetModel, Model, OrderKey, Select, SqlValue,
         TextColumnExt, Value,
     };
+    #[cfg(feature = "executor")]
+    pub use crate::{Database, SelectExecute, Transaction};
 }

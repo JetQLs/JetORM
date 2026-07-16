@@ -15,11 +15,18 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["executor"]
+# PostgreSQL execution layer (pulls in sqlx). Disable for frontend-only use,
+# for example query construction and SQL rendering without a database.
+executor = ["dep:jetorm-executor"]
+
 [dependencies]
 afterburner.workspace = true
 jetorm-derive.workspace = true
 jetorm-dialect.workspace = true
 jetorm-entity.workspace = true
+jetorm-executor = { workspace = true, optional = true }
 jetorm-query.workspace = true
 
 [dev-dependencies]

@@ -28,6 +28,39 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace
+
+  live-e2e:
+    name: Live E2E (PostgreSQL)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Each live test starts its own disposable database container through
+      # testcontainers; ubuntu runners ship with a Docker daemon.
+      - name: Live tests
+        run: cargo test --workspace -- --ignored
+
   ir-integrity:
     name: IR Integrity
     runs-on: ubuntu-latest

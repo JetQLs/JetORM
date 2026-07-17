@@ -33,7 +33,8 @@ pub use model::{
     JoinKind, Literal, LogicalOp, Module, NullOrder, Operation, OperationKind, OperationMetadata,
     OperationSpec, Region, RegionParent, ScalarKind, ScalarOp, ScalarType, Schema, SetOperator,
     SortDirection, SortKey, SourceSpan, SqlType, TableRef, TerminatorOp, TimeZone, Type,
-    UnaryOperator, Value, ValueDefinition, ValueUse, Volatility,
+    UnaryOperator, Value, ValueDefinition, ValueUse, Volatility, WindowFrame, WindowFrameBound,
+    WindowFrameExclusion, WindowFrameUnit, WindowSpec,
 };
 pub use mutation::{EditError, IrEditor};
 pub use support::{

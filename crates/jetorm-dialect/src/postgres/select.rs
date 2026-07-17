@@ -7,6 +7,8 @@ use crate::error::RenderError;
 use crate::postgres::quote_identifier;
 use crate::postgres::scalar::{ParamMap, RowScope, literal_sql, render_value};
 
+mod advanced;
+
 /// SQL clause slots in evaluation order.
 ///
 /// A relational operation fuses into the current `SELECT` only while clause
@@ -29,6 +31,7 @@ struct SelectBuilder {
     columns: Vec<String>,
     projection: Option<Vec<String>>,
     where_sql: Option<String>,
+    group_sql: Option<Vec<String>>,
     distinct: bool,
     order_sql: Vec<String>,
     offset: Option<u64>,
@@ -44,6 +47,7 @@ impl SelectBuilder {
             columns,
             projection: None,
             where_sql: None,
+            group_sql: None,
             distinct: false,
             order_sql: Vec::new(),
             offset: None,
@@ -80,6 +84,14 @@ impl SelectBuilder {
         if let Some(where_sql) = &self.where_sql {
             sql.push_str(" WHERE ");
             sql.push_str(where_sql);
+        }
+        if let Some(group_sql) = &self.group_sql {
+            sql.push_str(" GROUP BY ");
+            if group_sql.is_empty() {
+                sql.push_str("()");
+            } else {
+                sql.push_str(&group_sql.join(", "));
+            }
         }
         if !self.order_sql.is_empty() {
             sql.push_str(" ORDER BY ");
@@ -247,18 +259,17 @@ impl<'module> Renderer<'module> {
                 builder.stage = Stage::Limit;
                 Ok(builder)
             }
-            OperationKind::Logical(LogicalOp::Join { .. }) => {
-                Err(RenderError::unsupported("joins are not rendered yet"))
+            OperationKind::Logical(LogicalOp::Join {
+                kind,
+                has_condition,
+            }) => self.join_relation(operation_id, kind, has_condition),
+            OperationKind::Logical(LogicalOp::Aggregate { group_keys }) => {
+                self.aggregate_relation(operation_id, group_keys)
             }
-            OperationKind::Logical(LogicalOp::Aggregate) => {
-                Err(RenderError::unsupported("aggregates are not rendered yet"))
+            OperationKind::Logical(LogicalOp::Window) => self.window_relation(operation_id),
+            OperationKind::Logical(LogicalOp::Set { operator, all }) => {
+                self.set_relation(operation_id, operator, all)
             }
-            OperationKind::Logical(LogicalOp::Window) => Err(RenderError::unsupported(
-                "window functions are not rendered yet",
-            )),
-            OperationKind::Logical(LogicalOp::Set { .. }) => Err(RenderError::unsupported(
-                "set operations are not rendered yet",
-            )),
             OperationKind::Extension(extension) => Err(RenderError::unsupported(format!(
                 "extension operation {}.{} has no PostgreSQL rendering",
                 extension.dialect(),
@@ -469,6 +480,18 @@ impl<'module> Renderer<'module> {
         self.defining_operation(operand)
     }
 
+    fn input_relations(&self, operation_id: OperationId) -> Result<Vec<OperationId>, RenderError> {
+        let operation = self
+            .module
+            .operation(operation_id)
+            .ok_or_else(|| RenderError::inconsistent(format!("stale operation {operation_id}")))?;
+        operation
+            .operands()
+            .iter()
+            .map(|operand| self.defining_operation(*operand))
+            .collect()
+    }
+
     fn defining_operation(&self, value_id: ValueId) -> Result<OperationId, RenderError> {
         let value = self
             .module
@@ -496,6 +519,19 @@ impl<'module> Renderer<'module> {
             .map(afterburner::ir::Value::ty)
             .and_then(Type::as_relation)
             .ok_or_else(|| RenderError::inconsistent("relational result must carry a schema"))
+    }
+
+    fn result_columns(&self, operation_id: OperationId) -> Result<Vec<String>, RenderError> {
+        let schema_id = self.result_schema(operation_id)?;
+        let schema = self
+            .module
+            .schema(schema_id)
+            .ok_or_else(|| RenderError::inconsistent("stale relational result schema"))?;
+        Ok(schema
+            .fields()
+            .iter()
+            .map(|field| field.name().to_owned())
+            .collect())
     }
 
     fn next_alias(&mut self) -> String {

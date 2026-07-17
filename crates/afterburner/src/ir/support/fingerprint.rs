@@ -8,7 +8,8 @@ use super::{
     Attribute, BinaryOperator, BlockId, ExtensionOp, FunctionRef, JoinKind, Literal, LogicalOp,
     Module, NullOrder, OperationId, OperationKind, ScalarOp, SchemaId, SetOperator, SortDirection,
     SortKey, SqlType, TerminatorOp, TimeZone, Type, UnaryOperator, ValueId, VerificationError,
-    Volatility, verify_module,
+    Volatility, WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnit, WindowSpec,
+    verify_module,
 };
 
 /// Deterministic semantic identity for profile admission and incremental caches.
@@ -94,7 +95,7 @@ pub fn structural_fingerprint(module: &Module) -> Result<StructuralFingerprint, 
         next_block: 0,
         schema_stack: HashSet::new(),
     };
-    context.hasher.bytes(b"afterburner-ir-v1");
+    context.hasher.bytes(b"afterburner-ir-v2");
     context.hash_region(module.root_region())?;
     Ok(StructuralFingerprint(context.hasher.finish().to_be_bytes()))
 }
@@ -268,7 +269,10 @@ impl FingerprintContext<'_> {
                 self.hasher.tag(join_tag(*kind));
                 self.hasher.boolean(*has_condition);
             }
-            LogicalOp::Aggregate => self.hasher.tag(6),
+            LogicalOp::Aggregate { group_keys } => {
+                self.hasher.tag(6);
+                self.hasher.u32(*group_keys);
+            }
             LogicalOp::Window => self.hasher.tag(7),
             LogicalOp::Sort { keys } => {
                 self.hasher.tag(8);
@@ -342,11 +346,15 @@ impl FingerprintContext<'_> {
             }
             ScalarOp::WindowCall {
                 function,
+                argument_count,
+                window,
                 volatility,
                 effects,
             } => {
                 self.hasher.tag(8);
                 self.hash_function(function);
+                self.hasher.u32(*argument_count);
+                hash_window_spec(&mut self.hasher, window);
                 self.hasher.tag(volatility_tag(*volatility));
                 self.hasher.tag(effects.bits());
             }
@@ -467,7 +475,8 @@ impl FingerprintContext<'_> {
 ///
 /// Tags, field order, integer endianness, and the top-level domain separator form
 /// the persisted fingerprint format. Any incompatible encoding change must also
-/// change the `afterburner-ir-v1` domain string.
+/// advance the `afterburner-ir-vN` domain string used by
+/// [`structural_fingerprint`].
 struct StableHasher {
     state: u128,
 }
@@ -675,6 +684,53 @@ fn hash_sort_key(hasher: &mut StableHasher, key: SortKey) {
         NullOrder::Last => 1,
         NullOrder::DialectDefault => 2,
     });
+}
+
+fn hash_window_spec(hasher: &mut StableHasher, window: &WindowSpec) {
+    hasher.u32(window.partition_key_count());
+    hasher.usize(window.order_keys().len());
+    for key in window.order_keys() {
+        hash_sort_key(hasher, *key);
+    }
+    match window.frame() {
+        Some(frame) => {
+            hasher.boolean(true);
+            hash_window_frame(hasher, *frame);
+        }
+        None => hasher.boolean(false),
+    }
+}
+
+fn hash_window_frame(hasher: &mut StableHasher, frame: WindowFrame) {
+    hasher.tag(match frame.unit() {
+        WindowFrameUnit::Rows => 0,
+        WindowFrameUnit::Range => 1,
+        WindowFrameUnit::Groups => 2,
+    });
+    hash_window_bound(hasher, frame.start());
+    match frame.end() {
+        Some(end) => {
+            hasher.boolean(true);
+            hash_window_bound(hasher, end);
+        }
+        None => hasher.boolean(false),
+    }
+    hasher.tag(match frame.exclusion() {
+        WindowFrameExclusion::NoOthers => 0,
+        WindowFrameExclusion::CurrentRow => 1,
+        WindowFrameExclusion::Group => 2,
+        WindowFrameExclusion::Ties => 3,
+    });
+}
+
+fn hash_window_bound(hasher: &mut StableHasher, bound: WindowFrameBound) {
+    match bound {
+        WindowFrameBound::UnboundedPreceding => hasher.tag(0),
+        WindowFrameBound::Preceding => hasher.tag(1),
+        WindowFrameBound::CurrentRow => hasher.tag(2),
+        WindowFrameBound::Following => hasher.tag(3),
+        WindowFrameBound::UnboundedFollowing => hasher.tag(4),
+    }
 }
 
 fn join_tag(value: JoinKind) -> u8 {

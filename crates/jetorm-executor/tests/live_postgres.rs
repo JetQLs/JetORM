@@ -9,11 +9,19 @@
 //! cargo xtask test-live    # or: just test-live
 //! ```
 
+use afterburner::ir::{
+    BinaryOperator, EffectSet, Field, FunctionRef, JoinKind, Literal, LogicalOp, Module, NullOrder,
+    OperationSpec, ScalarOp, Schema, SchemaId, SetOperator, SortDirection, SortKey, SqlType,
+    TerminatorOp, Type, ValueId, Volatility, WindowFrame, WindowFrameBound, WindowFrameUnit,
+    WindowSpec, verify_module,
+};
+use jetorm_dialect::{Dialect, Postgres as PostgresDialect};
 use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue, TableMeta, Value,
 };
 use jetorm_executor::{Database, SelectExecute};
 use jetorm_query::{ColumnExt, EntityQuery, TextColumnExt};
+use sqlx::Row;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
@@ -265,6 +273,306 @@ async fn dropped_transactions_roll_back() {
         .await
         .expect("select after rollback");
     assert_eq!(outside, None, "dropped transaction must leave no rows");
+
+    db.close().await;
+}
+
+fn bigint_type() -> Type {
+    Type::scalar(
+        SqlType::Integer {
+            bits: 64,
+            signed: true,
+        },
+        false,
+    )
+}
+
+fn text_type() -> Type {
+    Type::scalar(SqlType::Utf8, true)
+}
+
+fn append_values(module: &mut Module, schema: SchemaId, rows: Vec<Vec<Literal>>) -> ValueId {
+    let root = module.root_block();
+    let mut editor = module.editor();
+    let operation = editor
+        .append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Values { rows }).with_result(Type::relation(schema)),
+        )
+        .expect("values append");
+    editor.result(operation, 0).expect("values result")
+}
+
+/// Builds one query exercising every scope-establishing PostgreSQL renderer.
+fn advanced_codegen_module() -> Module {
+    let mut module = Module::new();
+    let input_schema = module.editor().intern_schema(Schema::new(vec![
+        Field::new("id", bigint_type()),
+        Field::new("name", text_type()),
+    ]));
+    let join_schema = module.editor().intern_schema(Schema::new(vec![
+        Field::new("left_id", bigint_type()),
+        Field::new("left_name", text_type()),
+        Field::new("right_id", bigint_type()),
+        Field::new("right_name", text_type()),
+    ]));
+    let result_schema = module.editor().intern_schema(Schema::new(vec![
+        Field::new("category", text_type()),
+        Field::new("ordinal", bigint_type()),
+    ]));
+
+    let left = append_values(
+        &mut module,
+        input_schema,
+        vec![
+            vec![Literal::Integer(1), Literal::String("a".into())],
+            vec![Literal::Integer(2), Literal::String("b".into())],
+            vec![Literal::Integer(3), Literal::String("c".into())],
+        ],
+    );
+    let right = append_values(
+        &mut module,
+        input_schema,
+        vec![
+            vec![Literal::Integer(1), Literal::String("x".into())],
+            vec![Literal::Integer(1), Literal::String("y".into())],
+            vec![Literal::Integer(2), Literal::String("z".into())],
+        ],
+    );
+    let root = module.root_block();
+    let windowed = {
+        let mut editor = module.editor();
+        let join = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Join {
+                    kind: JoinKind::Inner,
+                    has_condition: true,
+                })
+                .with_operands(vec![left, right])
+                .with_result(Type::relation(join_schema)),
+            )
+            .expect("join appends");
+        let join_region = editor.add_region(join).expect("join owns a region");
+        let join_block = editor
+            .append_block(
+                join_region,
+                vec![bigint_type(), text_type(), bigint_type(), text_type()],
+            )
+            .expect("join block appends");
+        let left_id = editor
+            .block_argument(join_block, 0)
+            .expect("left id argument");
+        let right_id = editor
+            .block_argument(join_block, 2)
+            .expect("right id argument");
+        let equal = editor
+            .append_operation(
+                join_block,
+                OperationSpec::new(ScalarOp::Binary(BinaryOperator::Equal))
+                    .with_operands(vec![left_id, right_id])
+                    .with_result(Type::boolean(false)),
+            )
+            .expect("join equality appends");
+        let predicate = editor.result(equal, 0).expect("join predicate");
+        editor
+            .append_operation(
+                join_block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate]),
+            )
+            .expect("join yield appends");
+        let joined = editor.result(join, 0).expect("join result");
+
+        let aggregate_schema = editor.intern_schema(Schema::new(vec![
+            Field::new("category", text_type()),
+            Field::new("matches", bigint_type()),
+        ]));
+        let aggregate = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Aggregate { group_keys: 1 })
+                    .with_operands(vec![joined])
+                    .with_result(Type::relation(aggregate_schema)),
+            )
+            .expect("aggregate appends");
+        let aggregate_region = editor
+            .add_region(aggregate)
+            .expect("aggregate owns a region");
+        let aggregate_block = editor
+            .append_block(
+                aggregate_region,
+                vec![bigint_type(), text_type(), bigint_type(), text_type()],
+            )
+            .expect("aggregate block appends");
+        let category = editor
+            .block_argument(aggregate_block, 1)
+            .expect("aggregate category argument");
+        let counted_id = editor
+            .block_argument(aggregate_block, 2)
+            .expect("aggregate count argument");
+        let count = editor
+            .append_operation(
+                aggregate_block,
+                OperationSpec::new(ScalarOp::AggregateCall {
+                    function: FunctionRef::new("count"),
+                    distinct: false,
+                    volatility: Volatility::Immutable,
+                    effects: EffectSet::PURE,
+                })
+                .with_operands(vec![counted_id])
+                .with_result(bigint_type()),
+            )
+            .expect("aggregate call appends");
+        let matches = editor.result(count, 0).expect("aggregate call result");
+        editor
+            .append_operation(
+                aggregate_block,
+                OperationSpec::new(TerminatorOp::Yield)
+                    .with_operands(vec![category, category, matches]),
+            )
+            .expect("aggregate yield appends");
+        let aggregated = editor.result(aggregate, 0).expect("aggregate result");
+
+        let window = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Window)
+                    .with_operands(vec![aggregated])
+                    .with_result(Type::relation(result_schema)),
+            )
+            .expect("window appends");
+        let window_region = editor.add_region(window).expect("window owns a region");
+        let window_block = editor
+            .append_block(window_region, vec![text_type(), bigint_type()])
+            .expect("window block appends");
+        let category = editor
+            .block_argument(window_block, 0)
+            .expect("window category argument");
+        let partition = editor
+            .append_operation(
+                window_block,
+                OperationSpec::new(ScalarOp::Literal(Literal::String("all".into())))
+                    .with_result(text_type()),
+            )
+            .expect("window partition literal appends");
+        let partition = editor
+            .result(partition, 0)
+            .expect("window partition literal result");
+        let offset = editor
+            .append_operation(
+                window_block,
+                OperationSpec::new(ScalarOp::Literal(Literal::Integer(2)))
+                    .with_result(bigint_type()),
+            )
+            .expect("window frame offset appends");
+        let offset = editor
+            .result(offset, 0)
+            .expect("window frame offset result");
+        let specification = WindowSpec::new(
+            1,
+            vec![SortKey::new(SortDirection::Ascending, NullOrder::Last)],
+        )
+        .with_frame(WindowFrame::between(
+            WindowFrameUnit::Rows,
+            WindowFrameBound::Preceding,
+            WindowFrameBound::CurrentRow,
+        ));
+        let row_number = editor
+            .append_operation(
+                window_block,
+                OperationSpec::new(ScalarOp::WindowCall {
+                    function: FunctionRef::new("row_number"),
+                    argument_count: 0,
+                    window: specification,
+                    volatility: Volatility::Immutable,
+                    effects: EffectSet::PURE,
+                })
+                // Constant partition, category ordering, start-bound offset.
+                .with_operands(vec![partition, category, offset])
+                .with_result(bigint_type()),
+            )
+            .expect("window call appends");
+        let ordinal = editor.result(row_number, 0).expect("window call result");
+        editor
+            .append_operation(
+                window_block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![category, ordinal]),
+            )
+            .expect("window yield appends");
+        editor.result(window, 0).expect("window result")
+    };
+
+    let fallback = append_values(
+        &mut module,
+        result_schema,
+        vec![vec![
+            Literal::String("fallback".into()),
+            Literal::Integer(99),
+        ]],
+    );
+    {
+        let mut editor = module.editor();
+        let set = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Set {
+                    operator: SetOperator::Union,
+                    all: true,
+                })
+                .with_operands(vec![windowed, fallback])
+                .with_result(Type::relation(result_schema)),
+            )
+            .expect("set operation appends");
+        let result = editor.result(set, 0).expect("set result");
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![result]),
+            )
+            .expect("query return appends");
+    }
+    module
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn advanced_codegen_executes_on_postgres() {
+    let (_container, db) = fresh_database().await;
+    let module = advanced_codegen_module();
+    verify_module(&module).expect("advanced codegen fixture verifies");
+    let statement = PostgresDialect
+        .render_query(&module)
+        .expect("advanced IR renders");
+
+    let rows = sqlx::query(statement.sql())
+        .fetch_all(db.pool())
+        .await
+        .expect("generated SQL executes");
+    let mut values: Vec<(String, i64)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("category").expect("category decodes"),
+                row.try_get("ordinal").expect("ordinal decodes"),
+            )
+        })
+        .collect();
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(
+        values
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "fallback"]
+    );
+    let mut ordinals = values[..2]
+        .iter()
+        .map(|(_, ordinal)| *ordinal)
+        .collect::<Vec<_>>();
+    ordinals.sort_unstable();
+    assert_eq!(ordinals, [1, 2]);
+    assert_eq!(values[2].1, 99);
 
     db.close().await;
 }

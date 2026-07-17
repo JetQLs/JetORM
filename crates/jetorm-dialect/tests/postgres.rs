@@ -44,6 +44,10 @@ impl Model for User {
     fn from_values(_values: Vec<Value>) -> Result<Self, DecodeError> {
         unimplemented!("rendering tests never decode rows")
     }
+
+    fn value(&self, _column: usize) -> Option<Value> {
+        unimplemented!("rendering tests never read rows")
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

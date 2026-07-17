@@ -136,6 +136,10 @@ mod tests {
         fn from_values(_values: Vec<jetorm_entity::Value>) -> Result<Self, DecodeError> {
             Ok(Self)
         }
+
+        fn value(&self, _column: usize) -> Option<jetorm_entity::Value> {
+            Some(jetorm_entity::Value::Int64(0))
+        }
     }
 
     #[derive(Clone, Copy, Debug)]

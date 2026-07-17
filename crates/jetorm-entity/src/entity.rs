@@ -41,6 +41,12 @@ pub trait Model: Sized {
     /// Returns an error when the width or a payload kind does not match the
     /// entity's column metadata.
     fn from_values(values: Vec<Value>) -> Result<Self, DecodeError>;
+
+    /// Returns one column's value by position, or `None` out of range.
+    ///
+    /// Relation loaders read join keys through this without consuming the
+    /// row; write paths will read changed columns the same way.
+    fn value(&self, column: usize) -> Option<Value>;
 }
 
 /// Entities whose primary key is exactly one column.

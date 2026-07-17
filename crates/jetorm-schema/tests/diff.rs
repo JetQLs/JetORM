@@ -34,6 +34,10 @@ impl Model for User {
     fn from_values(_values: Vec<Value>) -> Result<Self, DecodeError> {
         Ok(Self)
     }
+
+    fn value(&self, _column: usize) -> Option<Value> {
+        None
+    }
 }
 
 fn users_table() -> TableDef {

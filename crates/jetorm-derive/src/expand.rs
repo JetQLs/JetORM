@@ -202,6 +202,16 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         quote!(<#field_ty as #cr::SqlValue>::into_value(self.#field_ident))
     });
 
+    let value_arms = columns.iter().enumerate().map(|(index, column)| {
+        let field_ident = &column.field_ident;
+        let field_ty = &column.field_ty;
+        quote! {
+            #index => ::core::option::Option::Some(
+                <#field_ty as #cr::SqlValue>::into_value(self.#field_ident.clone()),
+            )
+        }
+    });
+
     let from_value_fields = columns.iter().map(|column| {
         let field_ident = &column.field_ident;
         let field_ty = &column.field_ty;
@@ -216,6 +226,59 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             })?
         }
     });
+
+    let relation_markers = columns
+        .iter()
+        .filter_map(|column| {
+            let target = column.attrs.references.as_ref()?;
+            let relation_name = column
+                .attrs
+                .relation
+                .clone()
+                .unwrap_or_else(|| column.rust_name.clone());
+            let marker = match type_ident(&pascal_case(&relation_name), column.field_ident.span()) {
+                Ok(marker) => marker,
+                Err(message) => {
+                    return Some(Err(syn::Error::new(column.field_ident.span(), message)));
+                }
+            };
+            let source_marker = &column.marker_ident;
+            let on_delete = column
+                .attrs
+                .on_delete
+                .clone()
+                .unwrap_or_else(|| Ident::new("NoAction", column.field_ident.span()));
+            let on_update = column
+                .attrs
+                .on_update
+                .clone()
+                .unwrap_or_else(|| Ident::new("NoAction", column.field_ident.span()));
+            let doc = format!(
+                "Relation marker `{}`: `{}.{}` references the target column.",
+                relation_name, container.table, column.sql_name,
+            );
+            Some(Ok(quote! {
+                #[doc = #doc]
+                #[derive(Clone, Copy, Debug, Default)]
+                pub struct #marker;
+
+                #[automatically_derived]
+                impl #cr::Relation for #marker {
+                    type Source = super::#entity_ident;
+                    type Target = <#target as #cr::Column>::Entity;
+                    type SourceColumn = #source_marker;
+                    type TargetColumn = #target;
+                    const NAME: &'static str = #relation_name;
+                    const TO_ONE: bool = true;
+                    const FOREIGN_KEY: ::core::option::Option<#cr::ForeignKeyMeta> =
+                        ::core::option::Option::Some(#cr::ForeignKeyMeta::new(
+                            #cr::ReferentialAction::#on_delete,
+                            #cr::ReferentialAction::#on_update,
+                        ));
+                }
+            }))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     let column_markers = columns.iter().enumerate().map(|(index, column)| {
         let marker_ident = &column.marker_ident;
@@ -296,6 +359,13 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                     #(#from_value_fields),*
                 })
             }
+
+            fn value(&self, column: usize) -> ::core::option::Option<#cr::Value> {
+                match column {
+                    #(#value_arms,)*
+                    _ => ::core::option::Option::None,
+                }
+            }
         }
 
         #single_key_impl
@@ -306,6 +376,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             use super::*;
 
             #(#column_markers)*
+
+            #(#relation_markers)*
         }
     })
 }

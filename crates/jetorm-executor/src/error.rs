@@ -33,6 +33,11 @@ pub enum ExecuteError {
         /// Why the driver binding failed.
         detail: String,
     },
+    /// A relation load could not read or interpret a join key.
+    Relation {
+        /// Why the load failed.
+        detail: String,
+    },
     /// One fetched row could not be decoded into the entity's model.
     Decode {
         /// Zero-based index of the offending row in the result set.
@@ -106,6 +111,7 @@ impl fmt::Display for ExecuteError {
             Self::MalformedBind { position, detail } => {
                 write!(formatter, "bind position {position} is malformed: {detail}")
             }
+            Self::Relation { detail } => write!(formatter, "relation load failed: {detail}"),
             Self::Decode { row, source } => {
                 write!(formatter, "row {row} could not be decoded: {source}")
             }
@@ -119,7 +125,7 @@ impl Error for ExecuteError {
             Self::Build(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::MissingBind { .. } | Self::MalformedBind { .. } => None,
+            Self::MissingBind { .. } | Self::MalformedBind { .. } | Self::Relation { .. } => None,
             Self::Decode { source, .. } => Some(source),
         }
     }

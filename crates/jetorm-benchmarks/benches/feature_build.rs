@@ -325,5 +325,141 @@ fn projection_build(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, count_build, join_build, projection_build);
+/// One-row insert with RETURNING: `INSERT ... VALUES ... RETURNING *`.
+fn insert_build(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("insert_build");
+
+    let jet_user = || jet::User {
+        id: 0,
+        name: "alice".to_owned(),
+        email: Some("alice@example.com".to_owned()),
+    };
+    let jetorm_insert = || jet::UserEntity::insert(jet_user()).returning();
+
+    group.bench_function("jetorm_cold", |bencher| {
+        bencher.iter(|| {
+            let cache = PlanCache::new();
+            let mutation = jetorm_insert();
+            let statement = cache.statement(&mutation).expect("miss renders");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("jetorm_warm", |bencher| {
+        let cache = PlanCache::new();
+        cache
+            .statement(&jetorm_insert())
+            .expect("statement renders on the first call");
+        bencher.iter(|| {
+            let mutation = jetorm_insert();
+            let statement = cache.statement(&mutation).expect("cache resolves");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("seaorm", |bencher| {
+        use sea_orm::{ActiveValue, DbBackend, EntityTrait, QueryTrait};
+        bencher.iter(|| {
+            let row = sea_user::ActiveModel {
+                id: ActiveValue::NotSet,
+                name: ActiveValue::Set("alice".to_owned()),
+                email: ActiveValue::Set(Some("alice@example.com".to_owned())),
+            };
+            let statement = sea_user::Entity::insert(row).build(DbBackend::Postgres);
+            black_box((
+                statement.sql.len(),
+                statement.values.as_ref().map_or(0, |values| values.0.len()),
+            ))
+        });
+    });
+
+    group.bench_function("diesel", |bencher| {
+        use diesel::pg::Pg;
+        use diesel::prelude::*;
+        use schema::users::dsl::{email, name, users};
+        bencher.iter(|| {
+            let query = diesel::insert_into(users)
+                .values((name.eq("alice"), email.eq(Some("alice@example.com"))));
+            black_box(diesel::debug_query::<Pg, _>(&query).to_string().len())
+        });
+    });
+
+    group.finish();
+}
+
+/// A filtered two-column update: `UPDATE ... SET ... WHERE id = $n`.
+fn update_build(criterion: &mut Criterion) {
+    use jet::user;
+
+    let mut group = criterion.benchmark_group("update_build");
+
+    let jetorm_update = || {
+        jet::UserEntity::update()
+            .set(user::Name, "renamed")
+            .set_null(user::Email)
+            .filter(user::Id.eq(7))
+    };
+
+    group.bench_function("jetorm_cold", |bencher| {
+        bencher.iter(|| {
+            let cache = PlanCache::new();
+            let mutation = jetorm_update();
+            let statement = cache.statement(&mutation).expect("miss renders");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("jetorm_warm", |bencher| {
+        let cache = PlanCache::new();
+        cache
+            .statement(&jetorm_update())
+            .expect("statement renders on the first call");
+        bencher.iter(|| {
+            let mutation = jetorm_update();
+            let statement = cache.statement(&mutation).expect("cache resolves");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("seaorm", |bencher| {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        bencher.iter(|| {
+            let statement = sea_user::Entity::update_many()
+                .col_expr(sea_user::Column::Name, Expr::value("renamed"))
+                .col_expr(
+                    sea_user::Column::Email,
+                    Expr::value(sea_orm::Value::String(None)),
+                )
+                .filter(sea_user::Column::Id.eq(7))
+                .build(DbBackend::Postgres);
+            black_box((
+                statement.sql.len(),
+                statement.values.as_ref().map_or(0, |values| values.0.len()),
+            ))
+        });
+    });
+
+    group.bench_function("diesel", |bencher| {
+        use diesel::pg::Pg;
+        use diesel::prelude::*;
+        use schema::users::dsl::{email, id, name, users};
+        bencher.iter(|| {
+            let query = diesel::update(users.filter(id.eq(7)))
+                .set((name.eq("renamed"), email.eq(None::<String>)));
+            black_box(diesel::debug_query::<Pg, _>(&query).to_string().len())
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    count_build,
+    join_build,
+    projection_build,
+    insert_build,
+    update_build
+);
 criterion_main!(benches);

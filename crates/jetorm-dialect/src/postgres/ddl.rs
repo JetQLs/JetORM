@@ -183,6 +183,49 @@ fn referential_action_sql(action: ReferentialAction) -> Result<Option<&'static s
     }
 }
 
+/// Statements of one change, split by when they can safely run.
+///
+/// Staging exists for one reason: adding a foreign key to a populated
+/// table scans it under a lock strong enough to stall writes. The staged
+/// form adds the constraint `NOT VALID` — enforced for new writes
+/// immediately, cheap to take — and validates existing rows afterwards,
+/// outside the migration's transaction, under a weaker lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedStatements {
+    /// Statements that run inside the migration's transaction.
+    pub immediate: Vec<String>,
+    /// Validations that run afterwards, each in its own transaction.
+    pub deferred: Vec<String>,
+}
+
+/// Renders one change with foreign-key additions staged.
+///
+/// Every change except [`SchemaChange::AddForeignKey`] renders exactly as
+/// [`render_change`] does, entirely immediate.
+///
+/// # Errors
+///
+/// Returns an error when an identifier cannot be represented.
+pub fn render_change_staged(change: &SchemaChange) -> Result<StagedStatements, RenderError> {
+    if let SchemaChange::AddForeignKey { table, foreign_key } = change {
+        return Ok(StagedStatements {
+            immediate: vec![format!(
+                "{} NOT VALID",
+                add_foreign_key_sql(table, foreign_key)?
+            )],
+            deferred: vec![format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                table_sql(table)?,
+                quote_identifier(foreign_key.name())?
+            )],
+        });
+    }
+    Ok(StagedStatements {
+        immediate: render_change(change)?,
+        deferred: Vec::new(),
+    })
+}
+
 /// Renders every change of a change set in order.
 ///
 /// # Errors

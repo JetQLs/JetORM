@@ -9,7 +9,7 @@ use jetorm_executor::sqlx::{self, Row};
 use jetorm_migration::{
     HISTORY_TABLE, Migration, MigrationError, MigrationSet, MigrationState, MigrationStep, Migrator,
 };
-use jetorm_schema::{ColumnDef, SchemaChange, TableDef, TableName};
+use jetorm_schema::{ColumnDef, ForeignKeyDef, SchemaChange, TableDef, TableName};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
@@ -334,4 +334,82 @@ async fn raw_sql_steps_execute_verbatim() {
 
     migrator.down(1).await.expect("raw step reverts");
     db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn staged_constraints_enforce_new_writes_before_old_rows_validate() {
+    let (_container, database) = fresh_database().await;
+
+    // Two populated tables, one dangling reference already in the data.
+    for statement in [
+        "CREATE TABLE authors (id bigint PRIMARY KEY)",
+        "CREATE TABLE books (id bigint PRIMARY KEY, author_id bigint NOT NULL)",
+        "INSERT INTO authors (id) VALUES (1)",
+        "INSERT INTO books (id, author_id) VALUES (1, 1), (2, 999)",
+    ] {
+        sqlx::query(statement)
+            .execute(database.pool())
+            .await
+            .expect("seed statement runs");
+    }
+
+    let add_constraint = Migration::new(
+        "0001_link",
+        vec![MigrationStep::Change(SchemaChange::AddForeignKey {
+            table: TableName::new("books"),
+            foreign_key: ForeignKeyDef::new(
+                "books_author_id_fkey",
+                "author_id",
+                TableName::new("authors"),
+                "id",
+            ),
+        })],
+        Vec::new(),
+    );
+    let set = MigrationSet::new(vec![add_constraint]).expect("set builds");
+    let migrator = Migrator::new(&database, &set);
+    migrator.install().await.expect("history installs");
+
+    // Staged: the ADD lands NOT VALID, the migration records, and the
+    // deferred validation fails on the dangling row — with the recovery
+    // path named.
+    let error = migrator
+        .up_versions_staged(&["0001_link".to_owned()])
+        .await
+        .expect_err("existing rows violate the constraint");
+    assert!(
+        error.to_string().contains("repair the data and rerun"),
+        "the error names the recovery path: {error}"
+    );
+    let applied = migrator.applied().await.expect("history reads");
+    assert_eq!(applied.len(), 1, "the migration itself is recorded");
+
+    // New writes are already constrained even though old rows are not
+    // yet validated.
+    let rejected = sqlx::query("INSERT INTO books (id, author_id) VALUES (3, 777)")
+        .execute(database.pool())
+        .await;
+    assert!(
+        rejected.is_err(),
+        "a NOT VALID constraint still checks new writes"
+    );
+
+    // Repair the data, then validation completes.
+    sqlx::query("DELETE FROM books WHERE author_id = 999")
+        .execute(database.pool())
+        .await
+        .expect("repair runs");
+    let validated = migrator
+        .validate_pending_constraints("public")
+        .await
+        .expect("validation succeeds after repair");
+    assert_eq!(validated, ["books.books_author_id_fkey"]);
+
+    // Nothing left awaiting validation.
+    let again = migrator
+        .validate_pending_constraints("public")
+        .await
+        .expect("validation reruns");
+    assert!(again.is_empty());
 }

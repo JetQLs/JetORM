@@ -84,6 +84,17 @@ enum MigrateCommand {
     /// Diff the target schema against the migration files and write the
     /// change set as a new migration.
     Generate(GenerateArgs),
+    /// Validate constraints applied `NOT VALID` by a staged up.
+    Validate(ValidateArgs),
+}
+
+#[derive(Args)]
+struct ValidateArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+    /// Database schema whose pending constraints validate.
+    #[arg(long, default_value = "public")]
+    db_schema: String,
 }
 
 #[derive(Args)]
@@ -107,6 +118,10 @@ struct UpArgs {
     /// populated tables.
     #[arg(long)]
     allow_destructive: bool,
+    /// Add foreign keys `NOT VALID` inside the migration and validate
+    /// existing rows afterwards, avoiding long locks on populated tables.
+    #[arg(long)]
+    stage_constraints: bool,
 }
 
 #[derive(Args)]
@@ -165,6 +180,7 @@ fn main() -> ExitCode {
             Command::Migrate(MigrateCommand::Up(args)) => up(args).await,
             Command::Migrate(MigrateCommand::Down(args)) => down(args).await,
             Command::Migrate(MigrateCommand::Generate(args)) => generate(&args),
+            Command::Migrate(MigrateCommand::Validate(args)) => validate(args).await,
             Command::Db(DbCommand::Pull(args)) => pull(args).await,
             Command::Check(args) => check(args).await,
             Command::Ui(args) => tui(args).await,
@@ -254,12 +270,30 @@ async fn up(args: UpArgs) -> Result<ExitCode, String> {
         .iter()
         .map(|migration| migration.version().to_owned())
         .collect();
-    let applied = migrator
-        .up_versions(&plan)
-        .await
-        .map_err(|error| error.to_string())?;
+    let applied = if args.stage_constraints {
+        migrator.up_versions_staged(&plan).await
+    } else {
+        migrator.up_versions(&plan).await
+    }
+    .map_err(|error| error.to_string())?;
     for version in &applied {
         println!(" applied  {version}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn validate(args: ValidateArgs) -> Result<ExitCode, String> {
+    let (database, migrations) = connect(&args.connection).await?;
+    let migrator = Migrator::new(&database, &migrations);
+    let validated = migrator
+        .validate_pending_constraints(&args.db_schema)
+        .await
+        .map_err(|error| error.to_string())?;
+    if validated.is_empty() {
+        println!("no constraints awaiting validation");
+    }
+    for constraint in &validated {
+        println!("validated  {constraint}");
     }
     Ok(ExitCode::SUCCESS)
 }

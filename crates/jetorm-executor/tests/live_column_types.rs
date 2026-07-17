@@ -15,6 +15,7 @@ use jetorm_entity::Column;
 use jetorm_executor::{Database, SelectExecute};
 use jetorm_query::{ColumnExt, EntityQuery};
 use jetorm_schema::{SchemaChange, TableDef};
+use rust_decimal::Decimal;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
@@ -28,6 +29,22 @@ const POSTGRES_TAG: &str = "18-alpine";
 /// `crate_path` points the generated code at `jetorm-entity` directly: every
 /// item the derive emits lives there, so a test below the facade does not
 /// need to depend on it.
+/// String-backed enum column exercised end to end.
+#[derive(Clone, Copy, Debug, PartialEq, jetorm_derive::JetEnum)]
+#[jet(crate_path = "::jetorm_entity")]
+pub enum Status {
+    Draft,
+    #[jet(rename = "live")]
+    Published,
+}
+
+/// Typed JSON payload exercised end to end.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    pub theme: String,
+    pub page_size: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, jetorm_derive::JetModel)]
 #[jet(table = "every_type", crate_path = "::jetorm_entity")]
 pub struct EveryType {
@@ -47,6 +64,9 @@ pub struct EveryType {
     pub utc_moment: DateTime<Utc>,
     pub identifier: Uuid,
     pub document: serde_json::Value,
+    pub exact: Decimal,
+    pub status: Status,
+    pub settings: jetorm_entity::Json<Settings>,
     pub maybe_flag: Option<bool>,
     pub maybe_text: Option<String>,
     pub maybe_moment: Option<DateTime<Utc>>,
@@ -91,6 +111,13 @@ fn sample_row() -> EveryType {
             .expect("valid timestamp"),
         identifier: Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
         document: serde_json::json!({ "nested": [1, true, null], "s": "v" }),
+        // A value a binary float cannot represent exactly.
+        exact: Decimal::from_str_exact("12345678901234567890.123456789").expect("valid decimal"),
+        status: Status::Published,
+        settings: jetorm_entity::Json(Settings {
+            theme: "dark".to_owned(),
+            page_size: 50,
+        }),
         maybe_flag: None,
         maybe_text: Some("present".to_owned()),
         maybe_moment: None,
@@ -111,8 +138,10 @@ async fn seed(db: &Database, row: &EveryType) {
     sqlx::query(
         "INSERT INTO every_type (\
          id, flag, small, medium, large, single, double, text, blob, day, clock, \
-         naive_moment, utc_moment, identifier, document, maybe_flag, maybe_text, maybe_moment) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+         naive_moment, utc_moment, identifier, document, exact, status, settings, \
+         maybe_flag, maybe_text, maybe_moment) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+         $18, $19, $20, $21)",
     )
     .bind(row.id)
     .bind(row.flag)
@@ -129,6 +158,12 @@ async fn seed(db: &Database, row: &EveryType) {
     .bind(row.utc_moment)
     .bind(row.identifier)
     .bind(row.document.clone())
+    .bind(row.exact)
+    .bind(match row.status {
+        Status::Draft => "draft",
+        Status::Published => "live",
+    })
+    .bind(serde_json::to_value(&row.settings.0).expect("settings serialize"))
     .bind(row.maybe_flag)
     .bind(row.maybe_text.clone())
     .bind(row.maybe_moment)

@@ -41,6 +41,7 @@
 
 mod attrs;
 mod expand;
+mod jet_enum;
 mod partial;
 mod types;
 
@@ -85,6 +86,30 @@ pub fn derive_jet_model(input: TokenStream) -> TokenStream {
 pub fn derive_jet_partial(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     partial::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives a string-backed enum column.
+///
+/// Each unit variant stores a stable text name — the snake_case variant
+/// name, overridable with `#[jet(rename = "...")]` — so the column is
+/// portable `text` and needs no database enum type. The derive implements
+/// `SqlValue`, which makes the enum usable as a `JetModel` field type,
+/// in expressions, and in projections with no further annotation.
+///
+/// ```ignore
+/// #[derive(Clone, Debug, PartialEq, JetEnum)]
+/// pub enum Status {
+///     Draft,
+///     #[jet(rename = "live")]
+///     Published,
+/// }
+/// ```
+#[proc_macro_derive(JetEnum, attributes(jet))]
+pub fn derive_jet_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    jet_enum::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

@@ -61,6 +61,9 @@ pub enum ColumnType {
     Float32,
     /// 64-bit IEEE floating point.
     Float64,
+    /// Exact arbitrary-precision decimal (`numeric` without a declared
+    /// precision, so no stored value is ever rounded by the type).
+    Decimal,
     /// Unicode text.
     Text,
     /// Opaque byte sequence.

@@ -340,10 +340,26 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         })
     });
 
-    let column_markers = columns.iter().enumerate().map(|(index, column)| {
-        let marker_ident = &column.marker_ident;
+    // Field types are re-resolved through hidden aliases in a nested
+    // module: inside the column module the markers themselves shadow any
+    // user type sharing a marker's name (`status: Status`), so the alias
+    // module — which contains no markers — is where the user's spelling of
+    // the type still means what it meant on the struct.
+    let field_aliases = columns.iter().enumerate().map(|(index, column)| {
+        let rust_alias = format_ident!("R{index}");
+        let field_alias = format_ident!("F{index}");
         let inner_ty = &column.spec.inner;
         let field_ty = &column.field_ty;
+        quote! {
+            pub type #rust_alias = #inner_ty;
+            pub type #field_alias = #field_ty;
+        }
+    });
+
+    let column_markers = columns.iter().enumerate().map(|(index, column)| {
+        let marker_ident = &column.marker_ident;
+        let rust_alias = format_ident!("R{index}");
+        let field_alias = format_ident!("F{index}");
         let nullable = column.spec.nullable;
         let doc = format!(
             "Column marker for `{}.{}`.",
@@ -357,8 +373,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #[automatically_derived]
             impl #cr::Column for #marker_ident {
                 type Entity = super::#entity_ident;
-                type Rust = #inner_ty;
-                type Field = #field_ty;
+                type Rust = __jet_fields::#rust_alias;
+                type Field = __jet_fields::#field_alias;
                 const INDEX: usize = #index;
                 const NULLABLE: bool = #nullable;
             }
@@ -436,6 +452,14 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #[allow(unused_imports)]
             use super::*;
 
+            #[doc(hidden)]
+            pub mod __jet_fields {
+                #[allow(unused_imports)]
+                use super::super::*;
+
+                #(#field_aliases)*
+            }
+
             #(#column_markers)*
 
             #(#relation_markers)*
@@ -443,7 +467,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-fn snake_case(input: &str) -> String {
+pub(crate) fn snake_case(input: &str) -> String {
     let mut output = String::with_capacity(input.len() + 4);
     for (index, character) in input.chars().enumerate() {
         if character.is_uppercase() {

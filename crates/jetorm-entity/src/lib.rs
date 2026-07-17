@@ -25,12 +25,14 @@
 
 mod entity;
 mod error;
+mod json;
 mod meta;
 mod relation;
 mod value;
 
 pub use entity::{Column, Entity, Model, SingleKeyEntity};
 pub use error::{DecodeError, ValueTypeMismatch};
+pub use json::Json;
 pub use meta::{ColumnMeta, ColumnType, TableMeta};
 pub use relation::{ForeignKeyMeta, ForeignKeyRef, Inverse, ReferentialAction, Relation};
 pub use value::{SqlValue, Value};

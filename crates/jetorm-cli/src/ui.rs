@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use jetorm_executor::Database;
-use jetorm_migration::{MigrationSet, MigrationState, Migrator};
+use jetorm_migration::{Migration, MigrationSet, MigrationState, MigrationStep, Migrator};
 use jetorm_schema::{RenameCandidate, SchemaDiff, SchemaSet, diff};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -53,6 +53,13 @@ pub enum Mode {
         /// Remaining candidates, first one being asked about.
         candidates: Vec<RenameCandidate>,
     },
+    /// Confirming that the reviewed drift becomes the next migration.
+    ConfirmGenerate {
+        /// Rendered changes that would be written.
+        changes: Vec<String>,
+        /// Whether any change can lose data or fail on populated tables.
+        destructive: bool,
+    },
     /// Showing a completed action's outcome until any key.
     Notice(String),
 }
@@ -82,6 +89,7 @@ pub enum Action {
     Refresh,
     StartApply,
     StartRenameReview,
+    StartGenerate,
     Confirm,
     Cancel,
     Quit,
@@ -98,6 +106,8 @@ pub enum Effect {
     Apply(Vec<String>),
     /// Rewrite the drift through one confirmed rename.
     ConfirmRename(RenameCandidate),
+    /// Write the reviewed drift as the next migration file.
+    Generate,
 }
 
 impl Ui {
@@ -127,6 +137,7 @@ impl Ui {
             (Mode::Browse, KeyCode::Char('r')) => Some(Action::Refresh),
             (Mode::Browse, KeyCode::Char('u')) => Some(Action::StartApply),
             (Mode::Browse, KeyCode::Char('n')) => Some(Action::StartRenameReview),
+            (Mode::Browse, KeyCode::Char('g')) => Some(Action::StartGenerate),
             (Mode::Browse, KeyCode::Char('q') | KeyCode::Esc) => Some(Action::Quit),
             (Mode::Notice(_), _) => Some(Action::Cancel),
             (_, KeyCode::Char('y') | KeyCode::Enter) => Some(Action::Confirm),
@@ -161,6 +172,31 @@ impl Ui {
                     destructive: pending.iter().any(|row| row.destructive),
                 };
                 Effect::None
+            }
+            (Mode::Browse, Action::StartGenerate) => {
+                if self.drift.is_empty() {
+                    self.mode = Mode::Notice("no drift to generate from".to_owned());
+                    return Effect::None;
+                }
+                if !self.candidates.is_empty() {
+                    self.mode = Mode::Notice(format!(
+                        "{} rename candidate(s) unreviewed; press n first",
+                        self.candidates.len()
+                    ));
+                    return Effect::None;
+                }
+                self.mode = Mode::ConfirmGenerate {
+                    changes: self.drift.clone(),
+                    destructive: self
+                        .drift
+                        .iter()
+                        .any(|change| change.starts_with("drop") || change.starts_with("alter")),
+                };
+                Effect::None
+            }
+            (Mode::ConfirmGenerate { .. }, Action::Confirm) => {
+                self.mode = Mode::Browse;
+                Effect::Generate
             }
             (Mode::Browse, Action::StartRenameReview) => {
                 if self.candidates.is_empty() {
@@ -366,6 +402,29 @@ async fn run_effect(
             *snapshot = load(database, dir, schema).await?;
             Ok(Some(format!("applied {}", applied.join(", "))))
         }
+        Effect::Generate => {
+            let Some(live) = snapshot.diff.as_ref() else {
+                return Ok(None);
+            };
+            let migrations =
+                MigrationSet::from_directory(dir).map_err(|error| error.to_string())?;
+            let version = crate::next_version(&migrations, "reviewed");
+            let up: Vec<MigrationStep> = live
+                .changes()
+                .iter()
+                .cloned()
+                .map(MigrationStep::Change)
+                .collect();
+            let migration = Migration::new(version.clone(), up, Vec::new());
+            let contents = migration.to_toml().map_err(|error| error.to_string())?;
+            let path = dir.join(format!("{version}.toml"));
+            if path.exists() {
+                return Err(format!("{} already exists", path.display()));
+            }
+            std::fs::write(&path, contents).map_err(|error| error.to_string())?;
+            *snapshot = load(database, dir, schema).await?;
+            Ok(Some(format!("wrote {version}.toml; press u to apply")))
+        }
         Effect::ConfirmRename(candidate) => {
             let Some(live) = snapshot.diff.as_mut() else {
                 return Ok(None);
@@ -457,6 +516,24 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &Ui) {
                 "y rewrites the drop-plus-add into a rename; n keeps it",
             ));
         }
+        Mode::ConfirmGenerate {
+            changes,
+            destructive,
+        } => {
+            detail.push(Line::from(format!(
+                "write {} change(s) as the next migration? [y/n]",
+                changes.len()
+            )));
+            if *destructive {
+                detail.push(Line::styled(
+                    "includes destructive changes; applying will need acknowledgement",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
+            for change in changes {
+                detail.push(Line::from(format!("  {change}")));
+            }
+        }
         Mode::Notice(notice) => detail.push(Line::from(notice.clone())),
         Mode::Browse => {
             if let Some(row) = ui.rows.get(ui.selected) {
@@ -488,7 +565,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &Ui) {
     );
 
     frame.render_widget(
-        Paragraph::new("↑/↓ select   u apply   n renames   r reload   q quit"),
+        Paragraph::new("↑/↓ select   u apply   n renames   g generate   r reload   q quit"),
         vertical[1],
     );
 }
@@ -566,6 +643,29 @@ mod tests {
             Effect::ConfirmRename(candidates[1].clone())
         );
         assert_eq!(ui.mode, Mode::Browse, "the review ends after the last one");
+    }
+
+    #[test]
+    fn generating_requires_a_reviewed_plan() {
+        let mut ui = Ui::new(rows(), vec!["create table t".to_owned()], Vec::new());
+        ui.apply_action(Action::StartGenerate);
+        assert!(matches!(ui.mode, Mode::ConfirmGenerate { .. }));
+        assert_eq!(ui.apply_action(Action::Confirm), Effect::Generate);
+        assert_eq!(ui.mode, Mode::Browse);
+
+        // Unreviewed rename candidates block generation: the whole point
+        // of the review is deciding before the plan is written down.
+        use jetorm_schema::TableName;
+        let mut ui = Ui::new(
+            rows(),
+            vec!["drop table users".to_owned()],
+            vec![RenameCandidate::Table {
+                from: TableName::new("users"),
+                to: TableName::new("accounts"),
+            }],
+        );
+        assert_eq!(ui.apply_action(Action::StartGenerate), Effect::None);
+        assert!(matches!(ui.mode, Mode::Notice(_)));
     }
 
     #[test]

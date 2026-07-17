@@ -44,6 +44,15 @@ pub enum LoweringError {
     /// (deduplicate the source row, or the joined pair?) is not expressible
     /// yet. Remove one of the two.
     DistinctOverJoin,
+    /// The query combined grouping with a row limit or offset, whose
+    /// meaning (limit the source rows, or the groups?) is not expressible
+    /// yet. Remove one of the two.
+    LimitOverGroup,
+    /// The same column appears twice among a grouping's keys.
+    DuplicateGroupKey {
+        /// Position of the repeated column.
+        column: usize,
+    },
 }
 
 impl fmt::Display for LoweringError {
@@ -59,6 +68,14 @@ impl fmt::Display for LoweringError {
             Self::DistinctOverJoin => {
                 formatter.write_str("distinct combined with a relation join is not supported yet")
             }
+            Self::LimitOverGroup => formatter
+                .write_str("a row limit or offset combined with grouping is not supported yet"),
+            Self::DuplicateGroupKey { column } => {
+                write!(
+                    formatter,
+                    "group key column {column} appears more than once"
+                )
+            }
         }
     }
 }
@@ -69,7 +86,9 @@ impl Error for LoweringError {
             Self::Internal(error) => Some(error),
             Self::OperandKindMismatch { .. }
             | Self::DistinctOverProjection
-            | Self::DistinctOverJoin => None,
+            | Self::DistinctOverJoin
+            | Self::LimitOverGroup
+            | Self::DuplicateGroupKey { .. } => None,
         }
     }
 }
@@ -473,6 +492,20 @@ fn lower_grouped<E>(
 where
     E: Entity,
 {
+    // A limit's meaning under grouping (source rows or groups?) is
+    // ambiguous, so it is rejected rather than guessed — the same policy
+    // as distinct over projections. Repeated keys would produce duplicate
+    // schema fields, which the verifier rejects with an internal-looking
+    // error; failing here names the user's actual mistake.
+    if select.offset.is_some() || select.fetch.is_some() {
+        return Err(LoweringError::LimitOverGroup);
+    }
+    for (position, key) in keys.iter().enumerate() {
+        if keys[..position].contains(key) {
+            return Err(LoweringError::DuplicateGroupKey { column: *key });
+        }
+    }
+
     let mut module = Module::new();
     let root = module.root_block();
     {
@@ -504,8 +537,10 @@ where
         for (position, spec) in aggregates.iter().enumerate() {
             let ty = ScalarType::new(sql_type(spec.column_type), spec.nullable);
             aggregate_types.push(ty.clone());
+            // The prefix keeps aggregate fields out of the namespace any
+            // entity column could plausibly occupy.
             fields.push(Field::new(
-                format!("{}_{position}", spec.function.sql_name()),
+                format!("__agg_{position}_{}", spec.function.sql_name()),
                 Type::Scalar(ty),
             ));
         }

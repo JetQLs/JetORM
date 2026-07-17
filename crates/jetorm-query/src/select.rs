@@ -445,12 +445,14 @@ impl QueryShape {
         E: Entity,
     {
         let entity = TypeId::of::<E>();
+        let has_offset = select.offset.is_some();
+        let has_fetch = select.fetch.is_some();
 
         let mut hasher = shape_seed().build_hasher();
         entity.hash(&mut hasher);
         select.filter.hash(&mut hasher);
         Vec::<SortKeySpec>::new().hash(&mut hasher);
-        (false, false, select.distinct, false).hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct, false).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
         true.hash(&mut hasher);
@@ -461,8 +463,8 @@ impl QueryShape {
             entity,
             filter: select.filter.clone(),
             order: Vec::new(),
-            has_offset: false,
-            has_fetch: false,
+            has_offset,
+            has_fetch,
             distinct: select.distinct,
             projection: None,
             count: false,

@@ -11,7 +11,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, LitStr, Path};
 
 use crate::attrs;
-use crate::expand::snake_case;
+use crate::expand::{snake_case, unraw};
 
 fn parse_crate_path(input: &DeriveInput) -> syn::Result<Path> {
     let mut crate_path = None;
@@ -93,7 +93,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         let ident = &variant.ident;
         let stored = match parse_variant_name(variant)? {
             Some(explicit) => explicit,
-            None => snake_case(&ident.to_string()),
+            None => snake_case(&unraw(ident)),
         };
         if let Some(previous) = seen.insert(stored.clone(), ident.clone()) {
             return Err(syn::Error::new_spanned(

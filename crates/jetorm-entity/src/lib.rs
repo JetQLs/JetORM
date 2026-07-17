@@ -26,9 +26,11 @@
 mod entity;
 mod error;
 mod meta;
+mod relation;
 mod value;
 
 pub use entity::{Column, Entity, Model, SingleKeyEntity};
 pub use error::{DecodeError, ValueTypeMismatch};
 pub use meta::{ColumnMeta, ColumnType, TableMeta};
+pub use relation::{ForeignKeyMeta, Inverse, ReferentialAction, Relation};
 pub use value::{SqlValue, Value};

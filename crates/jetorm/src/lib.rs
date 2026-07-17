@@ -48,13 +48,13 @@ pub use afterburner::{AfterBurnerError, AfterBurnerOptions, IntoAfterBurnerIr, a
 pub use jetorm_derive::JetModel;
 pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement};
 pub use jetorm_entity::{
-    Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SingleKeyEntity, SqlValue,
-    TableMeta, Value, ValueTypeMismatch,
+    Column, ColumnMeta, ColumnType, DecodeError, Entity, ForeignKeyMeta, Inverse, Model,
+    ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta, Value, ValueTypeMismatch,
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
     Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, JetRow, PlanCache,
-    ProjectedExecute, SelectExecute, Transaction,
+    ProjectedExecute, SelectExecute, Transaction, load_many, load_one,
 };
 pub use jetorm_query::{
     ColumnExt, ColumnList, EntityQuery, Expr, LoweringError, OrderKey, Projected, Select,
@@ -64,9 +64,9 @@ pub use jetorm_query::{
 /// Single-import surface for application code.
 pub mod prelude {
     pub use crate::{
-        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, JetModel, Model, OrderKey,
-        Projected, Select, SqlValue, TextColumnExt, Value,
+        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, Inverse, JetModel, Model,
+        OrderKey, Projected, Relation, Select, SqlValue, TextColumnExt, Value,
     };
     #[cfg(feature = "executor")]
-    pub use crate::{Database, ProjectedExecute, SelectExecute, Transaction};
+    pub use crate::{Database, ProjectedExecute, SelectExecute, Transaction, load_many, load_one};
 }

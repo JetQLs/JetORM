@@ -35,6 +35,7 @@
 //! #         let mut values = values.into_iter();
 //! #         Ok(Self { id: i64::from_value(values.next().unwrap()).unwrap() })
 //! #     }
+//! #     fn value(&self, _: usize) -> Option<Value> { Some(self.id.into_value()) }
 //! # }
 //! impl Entity for UserEntity {
 //!     type Model = User;

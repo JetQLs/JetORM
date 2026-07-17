@@ -72,6 +72,15 @@ impl Model for User {
             })?;
         Ok(Self { id, name, email })
     }
+
+    fn value(&self, column: usize) -> Option<Value> {
+        match column {
+            0 => Some(self.id.into_value()),
+            1 => Some(self.name.clone().into_value()),
+            2 => Some(self.email.clone().into_value()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

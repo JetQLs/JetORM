@@ -36,6 +36,7 @@
 //! #     type Entity = UserEntity;
 //! #     fn into_values(self) -> Vec<jetorm_entity::Value> { vec![] }
 //! #     fn from_values(_: Vec<jetorm_entity::Value>) -> Result<Self, jetorm_entity::DecodeError> { Ok(Self { id: 0 }) }
+//! #     fn value(&self, _: usize) -> Option<jetorm_entity::Value> { Some(jetorm_entity::Value::Int64(self.id)) }
 //! # }
 //! # impl Entity for UserEntity {
 //! #     type Model = User;
@@ -57,6 +58,7 @@
 mod database;
 mod error;
 mod plan;
+mod relations;
 mod row;
 mod select;
 mod value;
@@ -64,6 +66,7 @@ mod value;
 pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::{ErrorKind, ExecuteError};
 pub use plan::PlanCache;
+pub use relations::{load_many, load_one};
 pub use row::JetRow;
 pub use select::{ProjectedExecute, SelectExecute};
 

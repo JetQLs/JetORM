@@ -3383,6 +3383,7 @@ dependencies = [
  "log",
  "sea-orm-macros",
  "sea-query",
+ "sea-query-sqlx",
  "strum",
  "thiserror 2.0.18",
  "tracing",
@@ -3428,6 +3429,15 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "sea-query-sqlx"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eaa419cdb9157da1361186b1959983eb2ea0dcb9a3c69dc45c449ecb2af8fef"
+dependencies = [
+ "sea-query",
 ]
 
 [[package]]

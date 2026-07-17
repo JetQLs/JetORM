@@ -58,6 +58,19 @@ mod jet {
         /// Display name.
         pub name: String,
     }
+
+    /// One row of `public.boards`, carrying array columns.
+    #[derive(Clone, Debug, JetModel)]
+    #[jet(table = "boards", schema = "public")]
+    pub struct Board {
+        /// Generated primary key.
+        #[jet(primary_key, auto_increment)]
+        pub id: i64,
+        /// Text array column.
+        pub tags: Vec<String>,
+        /// Integer array column.
+        pub scores: Vec<i32>,
+    }
 }
 
 /// SeaORM entities for the same tables.
@@ -110,6 +123,24 @@ mod sea_post {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+mod sea_board {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "boards", schema_name = "public")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub tags: Vec<String>,
+        pub scores: Vec<i32>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Diesel schema for the same tables.
 mod schema {
     diesel::table! {
@@ -125,6 +156,14 @@ mod schema {
             id -> BigInt,
             title -> Text,
             author_id -> BigInt,
+        }
+    }
+
+    diesel::table! {
+        public.boards (id) {
+            id -> BigInt,
+            tags -> Array<Text>,
+            scores -> Array<Integer>,
         }
     }
 
@@ -454,12 +493,134 @@ fn update_build(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// One-row insert of array columns with RETURNING:
+/// `INSERT ... VALUES ($1::text[], $2::integer[]) RETURNING *`.
+fn array_insert_build(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("array_insert_build");
+
+    let jet_board = || jet::Board {
+        id: 0,
+        tags: vec!["rust".to_owned(), "orm".to_owned()],
+        scores: vec![10, 20, 30],
+    };
+    let jetorm_insert = || jet::BoardEntity::insert(jet_board()).returning();
+
+    group.bench_function("jetorm_cold", |bencher| {
+        bencher.iter(|| {
+            let cache = PlanCache::new();
+            let mutation = jetorm_insert();
+            let statement = cache.statement(&mutation).expect("miss renders");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("jetorm_warm", |bencher| {
+        let cache = PlanCache::new();
+        cache
+            .statement(&jetorm_insert())
+            .expect("statement renders on the first call");
+        bencher.iter(|| {
+            let mutation = jetorm_insert();
+            let statement = cache.statement(&mutation).expect("cache resolves");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("seaorm", |bencher| {
+        use sea_orm::{ActiveValue, DbBackend, EntityTrait, QueryTrait};
+        bencher.iter(|| {
+            let row = sea_board::ActiveModel {
+                id: ActiveValue::NotSet,
+                tags: ActiveValue::Set(vec!["rust".to_owned(), "orm".to_owned()]),
+                scores: ActiveValue::Set(vec![10, 20, 30]),
+            };
+            let statement = sea_board::Entity::insert(row).build(DbBackend::Postgres);
+            black_box((
+                statement.sql.len(),
+                statement.values.as_ref().map_or(0, |values| values.0.len()),
+            ))
+        });
+    });
+
+    group.bench_function("diesel", |bencher| {
+        use diesel::pg::Pg;
+        use diesel::prelude::*;
+        use schema::boards::dsl::{boards, scores, tags};
+        bencher.iter(|| {
+            let query = diesel::insert_into(boards).values((
+                tags.eq(vec!["rust".to_owned(), "orm".to_owned()]),
+                scores.eq(vec![10, 20, 30]),
+            ));
+            black_box(diesel::debug_query::<Pg, _>(&query).to_string().len())
+        });
+    });
+
+    group.finish();
+}
+
+/// Whole-array equality filter: `SELECT ... WHERE scores = $1::integer[]`.
+fn array_filter_build(criterion: &mut Criterion) {
+    use jet::board;
+
+    let mut group = criterion.benchmark_group("array_filter_build");
+
+    let jetorm_filter = || jet::BoardEntity::find().filter(board::Scores.eq(vec![10, 20, 30]));
+
+    group.bench_function("jetorm_cold", |bencher| {
+        bencher.iter(|| {
+            let cache = PlanCache::new();
+            let query = jetorm_filter();
+            let statement = cache.statement(&query).expect("miss renders");
+            black_box((statement.sql().len(), query.into_binds().len()))
+        });
+    });
+
+    group.bench_function("jetorm_warm", |bencher| {
+        let cache = PlanCache::new();
+        cache
+            .statement(&jetorm_filter())
+            .expect("query renders on the first call");
+        bencher.iter(|| {
+            let query = jetorm_filter();
+            let statement = cache.statement(&query).expect("cache resolves");
+            black_box((statement.sql().len(), query.into_binds().len()))
+        });
+    });
+
+    group.bench_function("seaorm", |bencher| {
+        use sea_orm::{ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        bencher.iter(|| {
+            let statement = sea_board::Entity::find()
+                .filter(sea_board::Column::Scores.eq(vec![10, 20, 30]))
+                .build(DbBackend::Postgres);
+            black_box((
+                statement.sql.len(),
+                statement.values.as_ref().map_or(0, |values| values.0.len()),
+            ))
+        });
+    });
+
+    group.bench_function("diesel", |bencher| {
+        use diesel::pg::Pg;
+        use diesel::prelude::*;
+        use schema::boards::dsl::{boards, scores};
+        bencher.iter(|| {
+            let query = boards.filter(scores.eq(vec![10, 20, 30]));
+            black_box(diesel::debug_query::<Pg, _>(&query).to_string().len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     count_build,
     join_build,
     projection_build,
     insert_build,
-    update_build
+    update_build,
+    array_insert_build,
+    array_filter_build
 );
 criterion_main!(benches);

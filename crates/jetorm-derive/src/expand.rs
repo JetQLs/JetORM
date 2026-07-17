@@ -227,21 +227,54 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     });
 
+    // Marker names already claimed by columns; relation markers share the
+    // module, so a collision must be a spanned derive error rather than a
+    // bare rustc duplicate-definition error deep in generated code.
+    let mut claimed_markers: BTreeMap<String, String> = columns
+        .iter()
+        .map(|column| (column.marker_ident.to_string(), column.rust_name.clone()))
+        .collect();
     let relation_markers = columns
         .iter()
         .filter_map(|column| {
             let target = column.attrs.references.as_ref()?;
-            let relation_name = column
-                .attrs
-                .relation
-                .clone()
-                .unwrap_or_else(|| column.rust_name.clone());
+            // `author_id` names the edge `author` by convention; a field
+            // without the suffix has no usable default, since the bare
+            // field name is already the column marker's.
+            let relation_name = match column.attrs.relation.clone() {
+                Some(explicit) => explicit,
+                None => match column.rust_name.strip_suffix("_id") {
+                    Some(stem) if !stem.is_empty() => stem.to_owned(),
+                    _ => {
+                        return Some(Err(syn::Error::new(
+                            column.field_ident.span(),
+                            format!(
+                                "cannot derive a relation name from `{}`; \
+                                 set `#[jet(relation = \"...\")]` on the field",
+                                column.rust_name
+                            ),
+                        )));
+                    }
+                },
+            };
             let marker = match type_ident(&pascal_case(&relation_name), column.field_ident.span()) {
                 Ok(marker) => marker,
                 Err(message) => {
                     return Some(Err(syn::Error::new(column.field_ident.span(), message)));
                 }
             };
+            if let Some(previous) =
+                claimed_markers.insert(marker.to_string(), relation_name.clone())
+            {
+                return Some(Err(syn::Error::new(
+                    column.field_ident.span(),
+                    format!(
+                        "relation `{relation_name}` generates marker `{marker}`, which \
+                         `{previous}` already claims; rename it with \
+                         `#[jet(relation = \"...\")]`"
+                    ),
+                )));
+            }
             let source_marker = &column.marker_ident;
             let on_delete = column
                 .attrs

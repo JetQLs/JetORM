@@ -147,6 +147,34 @@ async fn load_one_resolves_references_and_null_keys() {
 
 #[tokio::test]
 #[ignore = "requires a running Docker daemon"]
+async fn parents_sharing_a_key_each_receive_the_full_group() {
+    let (_container, db) = fresh_database().await;
+    seed(&db).await;
+
+    let users = UserEntity::find()
+        .order_by(user::Id.asc())
+        .all(&db)
+        .await
+        .expect("users load");
+    // The same parent listed twice: both entries get alice's posts.
+    let doubled = vec![users[0].clone(), users[0].clone()];
+    let groups = load_many::<post::Author, _>(&doubled, &db)
+        .await
+        .expect("duplicate parents load");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].len(), 2, "first occurrence gets the full group");
+    assert_eq!(
+        groups[1].len(),
+        2,
+        "second occurrence gets the full group too, not leftovers"
+    );
+    assert_eq!(groups[0], groups[1]);
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
 async fn inverse_edges_traverse_backwards_without_their_own_derive() {
     let (_container, db) = fresh_database().await;
     seed(&db).await;

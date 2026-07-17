@@ -63,8 +63,9 @@ pub fn derive_jet_model(input: TokenStream) -> TokenStream {
 ///
 /// The struct holds a subset of the entity's columns; each field maps to
 /// the column marker with the field's PascalCase name inside the module
-/// named by `#[jet(columns = "...")]`, overridable per field with
-/// `#[jet(column = "Marker")]`. Field types must match the columns' field
+/// named by `#[jet(columns = "...")]`; a field named differently from the
+/// entity's names the entity field with `#[jet(column = "email")]`. Field
+/// types must match the columns' field
 /// types exactly — `Option` for nullable columns — checked at compile time.
 ///
 /// ```ignore

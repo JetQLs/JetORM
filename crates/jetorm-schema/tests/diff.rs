@@ -624,3 +624,103 @@ fn self_referencing_tables_diff_and_drop_cleanly() {
     assert_round_trip(&current, &target);
     assert_round_trip(&target, &current);
 }
+
+// ---- Review-workflow regression tests ---------------------------------------
+
+#[test]
+fn confirming_a_primary_key_column_rename_still_round_trips() {
+    // users(id pk) -> users(uid pk): the diff is drop+add+SetPrimaryKey and
+    // a rename candidate. Confirming the rename must absorb the primary-key
+    // change the rename itself performs, or apply rejects its own output.
+    let current = schema_of([TableDef::new(TableName::new("users"))
+        .with_column(ColumnDef::new("id", ColumnType::Int64))
+        .with_primary_key(vec!["id".to_owned()])]);
+    let target = schema_of([TableDef::new(TableName::new("users"))
+        .with_column(ColumnDef::new("uid", ColumnType::Int64))
+        .with_primary_key(vec!["uid".to_owned()])]);
+
+    let mut changes = diff(&current, &target);
+    let candidate = changes.rename_candidates()[0].clone();
+    assert!(changes.confirm_rename(&candidate));
+
+    let mut replayed = current.clone();
+    replayed
+        .apply_all(changes.changes())
+        .expect("a confirmed rename must apply to its own source state");
+    assert_eq!(replayed, target);
+    assert!(
+        !changes
+            .changes()
+            .iter()
+            .any(|change| matches!(change, SchemaChange::SetPrimaryKey { .. })),
+        "the rename subsumed the primary-key change entirely"
+    );
+}
+
+#[test]
+fn self_referencing_tables_surface_as_rename_candidates() {
+    let table = |name: &str| {
+        TableDef::new(TableName::new(name))
+            .with_column(ColumnDef::new("id", ColumnType::Int64))
+            .with_column(ColumnDef::new("manager_id", ColumnType::Int64).nullable())
+            .with_primary_key(vec!["id".to_owned()])
+            .with_foreign_key(ForeignKeyDef::new(
+                format!("{name}_manager_id_fkey"),
+                "manager_id",
+                TableName::new(name),
+                "id",
+            ))
+    };
+    let current = schema_of([table("employees")]);
+    let target = schema_of([table("staff")]);
+
+    let mut changes = diff(&current, &target);
+    let candidate = changes.rename_candidates().first().cloned().expect(
+        "a self-reference embeds its own table name, which must not \
+         disqualify an otherwise exact rename",
+    );
+    assert!(changes.confirm_rename(&candidate));
+
+    let mut replayed = current.clone();
+    replayed
+        .apply_all(changes.changes())
+        .expect("the confirmed self-referencing rename applies");
+    assert_eq!(replayed, target);
+}
+
+#[test]
+fn dropping_a_column_takes_the_tables_own_self_reference_along() {
+    // PostgreSQL drops the altered table's constraints involving the column
+    // — including a self-reference targeting it — so the model must too.
+    let mut schema = schema_of([TableDef::new(TableName::new("employees"))
+        .with_column(ColumnDef::new("id", ColumnType::Int64))
+        .with_column(ColumnDef::new("manager_id", ColumnType::Int64).nullable())
+        .with_primary_key(vec!["id".to_owned()])
+        .with_foreign_key(ForeignKeyDef::new(
+            "employees_manager_id_fkey",
+            "manager_id",
+            TableName::new("employees"),
+            "id",
+        ))]);
+    schema
+        .apply(&SchemaChange::SetPrimaryKey {
+            table: TableName::new("employees"),
+            from: vec!["id".to_owned()],
+            to: vec![],
+        })
+        .expect("clearing the key first keeps the drop about the reference");
+    schema
+        .apply(&SchemaChange::DropColumn {
+            table: TableName::new("employees"),
+            column: "id".to_owned(),
+        })
+        .expect("the referenced column drops, exactly as it does live");
+    let table = schema
+        .table(&TableName::new("employees"))
+        .expect("table remains");
+    assert_eq!(
+        table.foreign_keys().count(),
+        0,
+        "the self-reference went with its referenced column"
+    );
+}

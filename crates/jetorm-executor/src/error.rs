@@ -45,6 +45,14 @@ pub enum ExecuteError {
         /// Underlying positional decode failure.
         source: DecodeError,
     },
+    /// A projected select was executed as a full-model fetch.
+    ///
+    /// A projection reorders or narrows the SELECT list, while full-model
+    /// decoding assigns values to fields positionally — running one as the
+    /// other would either fail confusingly or, worse, transpose same-typed
+    /// columns without any error. Execute projected queries through
+    /// [`crate::ProjectedExecute`] instead.
+    ProjectedModelFetch,
 }
 
 /// Driver-independent classification of an execution failure.
@@ -115,6 +123,9 @@ impl fmt::Display for ExecuteError {
             Self::Decode { row, source } => {
                 write!(formatter, "row {row} could not be decoded: {source}")
             }
+            Self::ProjectedModelFetch => formatter.write_str(
+                "a projected select cannot fetch full models; execute it through                  ProjectedExecute",
+            ),
         }
     }
 }
@@ -125,7 +136,10 @@ impl Error for ExecuteError {
             Self::Build(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::MissingBind { .. } | Self::MalformedBind { .. } | Self::Relation { .. } => None,
+            Self::MissingBind { .. }
+            | Self::MalformedBind { .. }
+            | Self::Relation { .. }
+            | Self::ProjectedModelFetch => None,
             Self::Decode { source, .. } => Some(source),
         }
     }

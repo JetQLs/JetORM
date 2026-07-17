@@ -366,6 +366,30 @@ impl SchemaDiff {
                 to: to.to_owned(),
             },
         );
+        // Applying the rename already rewrites the table's primary-key list,
+        // so a primary-key change diffed from the drop-plus-add pair must
+        // record the renamed state — and vanish entirely once the rename
+        // makes it a no-op — or its drift guard would reject the very state
+        // the rename produced.
+        self.changes.retain_mut(|change| {
+            let SchemaChange::SetPrimaryKey {
+                table: t,
+                from: prior,
+                to: desired,
+            } = change
+            else {
+                return true;
+            };
+            if t != table {
+                return true;
+            }
+            for column in prior.iter_mut() {
+                if column == from {
+                    *column = to.to_owned();
+                }
+            }
+            prior != desired
+        });
         true
     }
 }
@@ -457,15 +481,23 @@ pub fn diff(current: &SchemaSet, target: &SchemaSet) -> SchemaDiff {
 ///
 /// Foreign keys compare by shape rather than by constraint name: names
 /// regenerated from entity metadata embed the new table name, which must
-/// not disqualify an otherwise exact rename.
+/// not disqualify an otherwise exact rename. A self-reference necessarily
+/// embeds the table's own name too, so each side's self-references count
+/// as targeting "myself" rather than a literal name — otherwise a renamed
+/// self-referencing table could never surface as a rename candidate.
 fn same_table_shape(left: &TableDef, right: &TableDef) -> bool {
     left.primary_key() == right.primary_key()
         && left.columns().eq(right.columns())
         && left.foreign_keys().count() == right.foreign_keys().count()
-        && left
-            .foreign_keys()
-            .zip(right.foreign_keys())
-            .all(|(a, b)| a.same_shape(b))
+        && left.foreign_keys().zip(right.foreign_keys()).all(|(a, b)| {
+            let same_target = a.target_table() == b.target_table()
+                || (a.target_table() == left.name() && b.target_table() == right.name());
+            same_target
+                && a.column() == b.column()
+                && a.target_column() == b.target_column()
+                && a.delete_action() == b.delete_action()
+                && a.update_action() == b.update_action()
+        })
 }
 
 /// Emits the drop-then-add changes reconciling one table's foreign keys.

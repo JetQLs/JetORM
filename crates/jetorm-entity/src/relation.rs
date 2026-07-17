@@ -1,12 +1,13 @@
 use std::marker::PhantomData;
 
 use crate::entity::{Column, Entity};
+use crate::meta::TableMeta;
 
 /// Referential action a foreign key takes when the referenced row changes.
 ///
 /// The set mirrors standard SQL; unknown variants must be handled as the
 /// dialect surface grows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ReferentialAction {
     /// Reject the change at statement end.
@@ -48,6 +49,64 @@ impl ForeignKeyMeta {
     #[must_use]
     pub const fn on_update(&self) -> ReferentialAction {
         self.on_update
+    }
+}
+
+/// One foreign key of an entity, as value-level metadata.
+///
+/// Where [`Relation`] markers carry an edge at the type level for loaders
+/// and joins, this struct carries the same fact as a plain value so schema
+/// tooling can enumerate an entity's constraints through
+/// [`Entity::FOREIGN_KEYS`] without naming marker types. Both are emitted
+/// by the derive from one `#[jet(references = ...)]` attribute, so they
+/// cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ForeignKeyRef {
+    column: usize,
+    target_table: TableMeta,
+    target_column: &'static str,
+    actions: ForeignKeyMeta,
+}
+
+impl ForeignKeyRef {
+    /// Creates foreign-key metadata for one referencing column.
+    #[must_use]
+    pub const fn new(
+        column: usize,
+        target_table: TableMeta,
+        target_column: &'static str,
+        actions: ForeignKeyMeta,
+    ) -> Self {
+        Self {
+            column,
+            target_table,
+            target_column,
+            actions,
+        }
+    }
+
+    /// Returns the referencing column's position in [`Entity::COLUMNS`].
+    #[must_use]
+    pub const fn column(&self) -> usize {
+        self.column
+    }
+
+    /// Returns the referenced table's identity.
+    #[must_use]
+    pub const fn target_table(&self) -> TableMeta {
+        self.target_table
+    }
+
+    /// Returns the referenced column's SQL name.
+    #[must_use]
+    pub const fn target_column(&self) -> &'static str {
+        self.target_column
+    }
+
+    /// Returns the constraint's referential actions.
+    #[must_use]
+    pub const fn actions(&self) -> ForeignKeyMeta {
+        self.actions
     }
 }
 

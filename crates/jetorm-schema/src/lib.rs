@@ -31,4 +31,4 @@ mod model;
 
 pub use apply::ApplyError;
 pub use diff::{RenameCandidate, SchemaChange, SchemaDiff, diff};
-pub use model::{ColumnDef, SchemaSet, TableDef, TableName};
+pub use model::{ColumnDef, ForeignKeyDef, SchemaSet, TableDef, TableName};

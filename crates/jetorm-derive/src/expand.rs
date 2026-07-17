@@ -280,6 +280,33 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
+    let foreign_key_refs = columns.iter().enumerate().filter_map(|(index, column)| {
+        let target = column.attrs.references.as_ref()?;
+        let on_delete = column
+            .attrs
+            .on_delete
+            .clone()
+            .unwrap_or_else(|| Ident::new("NoAction", column.field_ident.span()));
+        let on_update = column
+            .attrs
+            .on_update
+            .clone()
+            .unwrap_or_else(|| Ident::new("NoAction", column.field_ident.span()));
+        Some(quote! {
+            #cr::ForeignKeyRef::new(
+                #index,
+                <<#target as #cr::Column>::Entity as #cr::Entity>::TABLE,
+                <<#target as #cr::Column>::Entity as #cr::Entity>::COLUMNS
+                    [<#target as #cr::Column>::INDEX]
+                    .name(),
+                #cr::ForeignKeyMeta::new(
+                    #cr::ReferentialAction::#on_delete,
+                    #cr::ReferentialAction::#on_update,
+                ),
+            )
+        })
+    });
+
     let column_markers = columns.iter().enumerate().map(|(index, column)| {
         let marker_ident = &column.marker_ident;
         let inner_ty = &column.spec.inner;
@@ -335,6 +362,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             const TABLE: #cr::TableMeta = #table_meta;
             const COLUMNS: &'static [#cr::ColumnMeta] = &[#(#column_metas),*];
             const PRIMARY_KEY: &'static [usize] = &[#(#primary_key_indices),*];
+            const FOREIGN_KEYS: &'static [#cr::ForeignKeyRef] = &[#(#foreign_key_refs),*];
         }
 
         #[automatically_derived]

@@ -35,6 +35,32 @@ pub enum ApplyError {
         /// Human-readable description of the disagreement.
         detail: String,
     },
+    /// An added foreign key's constraint name already exists on the table.
+    ForeignKeyExists {
+        /// Table owning the constraint.
+        table: TableName,
+        /// Conflicting constraint name.
+        name: String,
+    },
+    /// A dropped foreign key does not exist.
+    ForeignKeyMissing {
+        /// Table expected to own the constraint.
+        table: TableName,
+        /// Missing constraint name.
+        name: String,
+    },
+    /// A dropped table or column is still referenced by a foreign key.
+    ///
+    /// Mirrors the database, where such a drop fails outright; the
+    /// referencing constraint must be dropped first.
+    StillReferenced {
+        /// Table whose drop was rejected.
+        table: TableName,
+        /// Table owning the referencing constraint.
+        referencing_table: TableName,
+        /// Name of the referencing constraint.
+        constraint: String,
+    },
 }
 
 impl fmt::Display for ApplyError {
@@ -51,6 +77,20 @@ impl fmt::Display for ApplyError {
             Self::StateMismatch { table, detail } => {
                 write!(formatter, "state mismatch on {table}: {detail}")
             }
+            Self::ForeignKeyExists { table, name } => {
+                write!(formatter, "foreign key {name} on {table} already exists")
+            }
+            Self::ForeignKeyMissing { table, name } => {
+                write!(formatter, "foreign key {name} on {table} does not exist")
+            }
+            Self::StillReferenced {
+                table,
+                referencing_table,
+                constraint,
+            } => write!(
+                formatter,
+                "{table} is still referenced by foreign key {constraint} on {referencing_table}"
+            ),
         }
     }
 }
@@ -75,6 +115,10 @@ impl SchemaSet {
                 Ok(())
             }
             SchemaChange::DropTable(name) => {
+                // A self-reference vanishes with its table; any other
+                // inbound constraint must be dropped first, as it would be
+                // in the database.
+                self.require_unreferenced(name, None)?;
                 if self.remove(name).is_none() {
                     return Err(ApplyError::TableMissing(name.clone()));
                 }
@@ -89,6 +133,15 @@ impl SchemaSet {
                 };
                 table.set_name(to.clone());
                 self.insert(table);
+                // The database tracks references by identity, so inbound
+                // constraints follow a rename; mirror that in the model.
+                for table in self.tables_values_mut() {
+                    for foreign_key in table.foreign_keys_mut().values_mut() {
+                        if foreign_key.target_table() == from {
+                            foreign_key.set_target_table(to.clone());
+                        }
+                    }
+                }
                 Ok(())
             }
             SchemaChange::AddColumn { table, column } => {
@@ -105,6 +158,7 @@ impl SchemaSet {
                 Ok(())
             }
             SchemaChange::DropColumn { table, column } => {
+                self.require_unreferenced(table, Some(column))?;
                 let definition = self.require_table_mut(table)?;
                 if definition.columns_mut().remove(column).is_none() {
                     return Err(ApplyError::ColumnMissing {
@@ -112,6 +166,10 @@ impl SchemaSet {
                         column: column.clone(),
                     });
                 }
+                // The database drops a column's own constraints with it.
+                definition
+                    .foreign_keys_mut()
+                    .retain(|_, foreign_key| foreign_key.column() != column);
                 Ok(())
             }
             SchemaChange::RenameColumn { table, from, to } => {
@@ -142,6 +200,23 @@ impl SchemaSet {
                     })
                     .collect();
                 definition.set_primary_key(renamed_key);
+                // Constraints track columns by identity in the database, so
+                // both the owning and the referencing side follow a rename.
+                for foreign_key in definition.foreign_keys_mut().values_mut() {
+                    if foreign_key.column() == from {
+                        foreign_key.set_column(to.clone());
+                    }
+                }
+                let renamed_table = table;
+                for table in self.tables_values_mut() {
+                    for foreign_key in table.foreign_keys_mut().values_mut() {
+                        if foreign_key.target_table() == renamed_table
+                            && foreign_key.target_column() == from
+                        {
+                            foreign_key.set_target_column(to.clone());
+                        }
+                    }
+                }
                 Ok(())
             }
             SchemaChange::AlterColumnType {
@@ -212,6 +287,64 @@ impl SchemaSet {
                 definition.set_primary_key(to.clone());
                 Ok(())
             }
+            SchemaChange::AddForeignKey { table, foreign_key } => {
+                {
+                    let definition = self
+                        .table(table)
+                        .ok_or_else(|| ApplyError::TableMissing(table.clone()))?;
+                    if definition.foreign_key(foreign_key.name()).is_some() {
+                        return Err(ApplyError::ForeignKeyExists {
+                            table: table.clone(),
+                            name: foreign_key.name().to_owned(),
+                        });
+                    }
+                    if definition.column(foreign_key.column()).is_none() {
+                        return Err(ApplyError::ColumnMissing {
+                            table: table.clone(),
+                            column: foreign_key.column().to_owned(),
+                        });
+                    }
+                }
+                let target = self
+                    .table(foreign_key.target_table())
+                    .ok_or_else(|| ApplyError::TableMissing(foreign_key.target_table().clone()))?;
+                let Some(referenced) = target.column(foreign_key.target_column()) else {
+                    return Err(ApplyError::ColumnMissing {
+                        table: foreign_key.target_table().clone(),
+                        column: foreign_key.target_column().to_owned(),
+                    });
+                };
+                // The database requires the referenced column to be unique;
+                // catching the violation here keeps a bad change set from
+                // reaching DDL at all.
+                let is_sole_key = target.primary_key() == [referenced.name().to_owned()];
+                if !referenced.is_unique() && !is_sole_key {
+                    return Err(ApplyError::StateMismatch {
+                        table: foreign_key.target_table().clone(),
+                        detail: format!(
+                            "column {} referenced by foreign key {} is neither \
+                             unique nor the table's primary key",
+                            foreign_key.target_column(),
+                            foreign_key.name()
+                        ),
+                    });
+                }
+                let definition = self.require_table_mut(table)?;
+                definition
+                    .foreign_keys_mut()
+                    .insert(foreign_key.name().to_owned(), foreign_key.clone());
+                Ok(())
+            }
+            SchemaChange::DropForeignKey { table, name } => {
+                let definition = self.require_table_mut(table)?;
+                if definition.foreign_keys_mut().remove(name).is_none() {
+                    return Err(ApplyError::ForeignKeyMissing {
+                        table: table.clone(),
+                        name: name.clone(),
+                    });
+                }
+                Ok(())
+            }
         }
     }
 
@@ -227,6 +360,42 @@ impl SchemaSet {
     ) -> Result<(), ApplyError> {
         for change in changes {
             self.apply(change)?;
+        }
+        Ok(())
+    }
+
+    /// Rejects the change when another table's foreign key targets `table`
+    /// (or one of its columns, when `column` is given). The dropped table's
+    /// own constraints do not count: they vanish with it.
+    fn require_unreferenced(
+        &self,
+        table: &TableName,
+        column: Option<&str>,
+    ) -> Result<(), ApplyError> {
+        for owner in self.tables() {
+            if owner.name() == table && column.is_none() {
+                continue;
+            }
+            for foreign_key in owner.foreign_keys() {
+                if foreign_key.target_table() != table {
+                    continue;
+                }
+                if column.is_some_and(|column| foreign_key.target_column() != column) {
+                    continue;
+                }
+                // Dropping a column also drops constraints it owns, so a
+                // same-column self-reference does not block its own drop.
+                if owner.name() == table
+                    && column.is_some_and(|column| foreign_key.column() == column)
+                {
+                    continue;
+                }
+                return Err(ApplyError::StillReferenced {
+                    table: table.clone(),
+                    referencing_table: owner.name().clone(),
+                    constraint: foreign_key.name().to_owned(),
+                });
+            }
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use jetorm_entity::{ColumnType, Entity};
+use jetorm_entity::{ColumnType, Entity, ReferentialAction};
 use serde::{Deserialize, Serialize};
 
 /// Qualified table identity used as the schema-set key.
@@ -160,6 +160,116 @@ impl ColumnDef {
     }
 }
 
+/// Database-independent description of one foreign-key constraint.
+///
+/// A constraint is identified by its name within the owning table; the name
+/// follows PostgreSQL's default spelling (`{table}_{column}_fkey`) when the
+/// definition comes from entity metadata, matching how the dialect names
+/// every other constraint it creates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignKeyDef {
+    name: String,
+    column: String,
+    target_table: TableName,
+    target_column: String,
+    on_delete: ReferentialAction,
+    on_update: ReferentialAction,
+}
+
+impl ForeignKeyDef {
+    /// Creates a foreign-key definition with `NO ACTION` semantics.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        column: impl Into<String>,
+        target_table: TableName,
+        target_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            column: column.into(),
+            target_table,
+            target_column: target_column.into(),
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+        }
+    }
+
+    /// Clones this definition with an `ON DELETE` action.
+    #[must_use]
+    pub fn on_delete(mut self, action: ReferentialAction) -> Self {
+        self.on_delete = action;
+        self
+    }
+
+    /// Clones this definition with an `ON UPDATE` action.
+    #[must_use]
+    pub fn on_update(mut self, action: ReferentialAction) -> Self {
+        self.on_update = action;
+        self
+    }
+
+    /// Returns the constraint name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the referencing column's name.
+    #[must_use]
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    /// Returns the referenced table's identity.
+    #[must_use]
+    pub const fn target_table(&self) -> &TableName {
+        &self.target_table
+    }
+
+    /// Returns the referenced column's name.
+    #[must_use]
+    pub fn target_column(&self) -> &str {
+        &self.target_column
+    }
+
+    /// Returns the action taken when the referenced row is deleted.
+    #[must_use]
+    pub const fn delete_action(&self) -> ReferentialAction {
+        self.on_delete
+    }
+
+    /// Returns the action taken when the referenced key is updated.
+    #[must_use]
+    pub const fn update_action(&self) -> ReferentialAction {
+        self.on_update
+    }
+
+    /// Reports whether two definitions describe the same constraint,
+    /// ignoring the constraint name; used for rename-candidate detection,
+    /// where regenerated names embed the new table name.
+    #[must_use]
+    pub fn same_shape(&self, other: &Self) -> bool {
+        self.column == other.column
+            && self.target_table == other.target_table
+            && self.target_column == other.target_column
+            && self.on_delete == other.on_delete
+            && self.on_update == other.on_update
+    }
+
+    pub(crate) fn set_column(&mut self, column: String) {
+        self.column = column;
+    }
+
+    pub(crate) fn set_target_table(&mut self, table: TableName) {
+        self.target_table = table;
+    }
+
+    pub(crate) fn set_target_column(&mut self, column: String) {
+        self.target_column = column;
+    }
+}
+
 /// Database-independent description of one table.
 ///
 /// Column order is deliberately not semantic: relational DDL cannot reorder
@@ -171,6 +281,8 @@ pub struct TableDef {
     name: TableName,
     columns: BTreeMap<String, ColumnDef>,
     primary_key: Vec<String>,
+    #[serde(default)]
+    foreign_keys: BTreeMap<String, ForeignKeyDef>,
 }
 
 impl TableDef {
@@ -181,6 +293,7 @@ impl TableDef {
             name,
             columns: BTreeMap::new(),
             primary_key: Vec::new(),
+            foreign_keys: BTreeMap::new(),
         }
     }
 
@@ -188,6 +301,14 @@ impl TableDef {
     #[must_use]
     pub fn with_column(mut self, column: ColumnDef) -> Self {
         self.columns.insert(column.name().to_owned(), column);
+        self
+    }
+
+    /// Inserts or replaces one foreign-key constraint.
+    #[must_use]
+    pub fn with_foreign_key(mut self, foreign_key: ForeignKeyDef) -> Self {
+        self.foreign_keys
+            .insert(foreign_key.name().to_owned(), foreign_key);
         self
     }
 
@@ -222,6 +343,23 @@ impl TableDef {
             }
             table = table.with_column(definition);
         }
+        for foreign_key in E::FOREIGN_KEYS {
+            let column = E::COLUMNS[foreign_key.column()].name();
+            let target = match foreign_key.target_table().schema() {
+                Some(schema) => TableName::qualified(schema, foreign_key.target_table().name()),
+                None => TableName::new(foreign_key.target_table().name()),
+            };
+            table = table.with_foreign_key(
+                ForeignKeyDef::new(
+                    format!("{}_{column}_fkey", E::TABLE.name()),
+                    column,
+                    target,
+                    foreign_key.target_column(),
+                )
+                .on_delete(foreign_key.actions().on_delete())
+                .on_update(foreign_key.actions().on_update()),
+            );
+        }
         table.with_primary_key(
             E::PRIMARY_KEY
                 .iter()
@@ -253,8 +391,36 @@ impl TableDef {
         &self.primary_key
     }
 
+    /// Iterates foreign keys in constraint-name order.
+    pub fn foreign_keys(&self) -> impl Iterator<Item = &ForeignKeyDef> {
+        self.foreign_keys.values()
+    }
+
+    /// Returns one foreign key by constraint name.
+    #[must_use]
+    pub fn foreign_key(&self, name: &str) -> Option<&ForeignKeyDef> {
+        self.foreign_keys.get(name)
+    }
+
+    /// Clones this definition without its foreign keys.
+    ///
+    /// [`crate::diff`] emits `CREATE TABLE` without constraints and adds
+    /// them separately once every referenced table exists, so creation
+    /// order can never break a reference.
+    #[must_use]
+    pub fn without_foreign_keys(&self) -> Self {
+        Self {
+            foreign_keys: BTreeMap::new(),
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn columns_mut(&mut self) -> &mut BTreeMap<String, ColumnDef> {
         &mut self.columns
+    }
+
+    pub(crate) fn foreign_keys_mut(&mut self) -> &mut BTreeMap<String, ForeignKeyDef> {
+        &mut self.foreign_keys
     }
 
     pub(crate) fn set_primary_key(&mut self, columns: Vec<String>) {
@@ -317,6 +483,10 @@ impl SchemaSet {
 
     pub(crate) fn table_mut(&mut self, name: &TableName) -> Option<&mut TableDef> {
         self.tables.get_mut(name)
+    }
+
+    pub(crate) fn tables_values_mut(&mut self) -> impl Iterator<Item = &mut TableDef> {
+        self.tables.values_mut()
     }
 
     pub(crate) fn remove(&mut self, name: &TableName) -> Option<TableDef> {

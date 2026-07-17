@@ -1,9 +1,11 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jetorm_dialect::Statement;
 use jetorm_entity::{ColumnType, Value};
-use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
+use tracing::Instrument;
 
 use crate::error::ExecuteError;
 use crate::plan::PlanCache;
@@ -64,6 +66,11 @@ pub struct Database {
 #[must_use = "options do nothing until passed to a Database constructor"]
 pub struct DatabaseOptions {
     plan_cache_capacity: u64,
+    max_connections: Option<u32>,
+    min_connections: Option<u32>,
+    acquire_timeout: Option<Duration>,
+    idle_timeout: Option<Option<Duration>>,
+    max_lifetime: Option<Option<Duration>>,
 }
 
 impl DatabaseOptions {
@@ -74,9 +81,18 @@ impl DatabaseOptions {
     pub const DEFAULT_PLAN_CACHE_CAPACITY: u64 = 10_000;
 
     /// Creates the default configuration.
+    ///
+    /// Pool knobs left unset keep the driver's own defaults rather than
+    /// restating them here, so upgrading the driver never silently pins
+    /// stale values.
     pub fn new() -> Self {
         Self {
             plan_cache_capacity: Self::DEFAULT_PLAN_CACHE_CAPACITY,
+            max_connections: None,
+            min_connections: None,
+            acquire_timeout: None,
+            idle_timeout: None,
+            max_lifetime: None,
         }
     }
 
@@ -85,6 +101,59 @@ impl DatabaseOptions {
     pub const fn plan_cache_capacity(mut self, capacity: u64) -> Self {
         self.plan_cache_capacity = capacity;
         self
+    }
+
+    /// Sets the largest number of pooled connections.
+    pub const fn max_connections(mut self, connections: u32) -> Self {
+        self.max_connections = Some(connections);
+        self
+    }
+
+    /// Sets the number of connections the pool keeps open when idle.
+    pub const fn min_connections(mut self, connections: u32) -> Self {
+        self.min_connections = Some(connections);
+        self
+    }
+
+    /// Sets how long acquiring a connection may wait before failing.
+    pub const fn acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = Some(timeout);
+        self
+    }
+
+    /// Sets how long a connection may sit idle before closing; `None`
+    /// keeps idle connections forever.
+    pub const fn idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Sets how long a connection may live before being replaced; `None`
+    /// reuses connections forever.
+    pub const fn max_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.max_lifetime = Some(lifetime);
+        self
+    }
+
+    /// Builds the driver pool configuration from the set knobs.
+    fn pool_options(&self) -> PgPoolOptions {
+        let mut pool = PgPoolOptions::new();
+        if let Some(connections) = self.max_connections {
+            pool = pool.max_connections(connections);
+        }
+        if let Some(connections) = self.min_connections {
+            pool = pool.min_connections(connections);
+        }
+        if let Some(timeout) = self.acquire_timeout {
+            pool = pool.acquire_timeout(timeout);
+        }
+        if let Some(timeout) = self.idle_timeout {
+            pool = pool.idle_timeout(timeout);
+        }
+        if let Some(lifetime) = self.max_lifetime {
+            pool = pool.max_lifetime(lifetime);
+        }
+        pool
     }
 }
 
@@ -110,7 +179,8 @@ impl Database {
     ///
     /// Returns an error when the URL is invalid or the server is unreachable.
     pub async fn connect_with(url: &str, options: DatabaseOptions) -> Result<Self, ExecuteError> {
-        Ok(Self::from_pool_with(PgPool::connect(url).await?, options))
+        let pool = options.pool_options().connect(url).await?;
+        Ok(Self::from_pool_with(pool, options))
     }
 
     /// Wraps an externally configured pool with default options.
@@ -168,10 +238,30 @@ impl Executor for &Database {
         binds: Vec<Value>,
         columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
-        let query = build_query(&statement, &binds)?;
-        let rows = query.fetch_all(&self.pool).await?;
-        rows.iter().map(|row| decode_row(row, &columns)).collect()
+        let span = query_span(&statement, binds.len());
+        async {
+            let query = build_query(&statement, &binds)?;
+            let rows = query.fetch_all(&self.pool).await?;
+            tracing::Span::current().record("db.response.returned_rows", rows.len());
+            rows.iter().map(|row| decode_row(row, &columns)).collect()
+        }
+        .instrument(span)
+        .await
     }
+}
+
+/// One query execution span, named after OpenTelemetry's database
+/// conventions so existing collectors pick the fields up unchanged. Bound
+/// values are never recorded — only their count — because binds routinely
+/// carry user data.
+fn query_span(statement: &Statement, binds: usize) -> tracing::Span {
+    tracing::debug_span!(
+        "jetorm.query",
+        db.system.name = "postgresql",
+        db.query.text = statement.sql(),
+        db.operation.parameter_count = binds,
+        db.response.returned_rows = tracing::field::Empty,
+    )
 }
 
 /// One open database transaction.
@@ -228,8 +318,14 @@ impl Executor for &mut Transaction<'_> {
         binds: Vec<Value>,
         columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
-        let query = build_query(&statement, &binds)?;
-        let rows = query.fetch_all(&mut *self.inner).await?;
-        rows.iter().map(|row| decode_row(row, &columns)).collect()
+        let span = query_span(&statement, binds.len());
+        async {
+            let query = build_query(&statement, &binds)?;
+            let rows = query.fetch_all(&mut *self.inner).await?;
+            tracing::Span::current().record("db.response.returned_rows", rows.len());
+            rows.iter().map(|row| decode_row(row, &columns)).collect()
+        }
+        .instrument(span)
+        .await
     }
 }

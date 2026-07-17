@@ -295,3 +295,123 @@ async fn db_pull_generates_entities_and_a_usable_baseline() {
     );
     assert!(stdout(&replayed).contains("pending"));
 }
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn seed_applies_idempotently_and_converges_on_the_file() {
+    let container = Postgres::default()
+        .with_tag(POSTGRES_TAG)
+        .start()
+        .await
+        .expect("PostgreSQL test container starts (is Docker running?)");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("container maps the PostgreSQL port");
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = sqlx::postgres::PgPool::connect(&url)
+        .await
+        .expect("connects");
+    for statement in [
+        "CREATE TYPE role_kind AS ENUM ('human', 'robot')",
+        "CREATE TABLE roles (
+             name text PRIMARY KEY,
+             rank integer NOT NULL,
+             kind role_kind NOT NULL,
+             tags text[] NOT NULL DEFAULT '{}'
+         )",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("schema statement runs");
+    }
+
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let schema_toml = workspace.path().join("schema.toml");
+    let entities = workspace.path().join("entities.rs");
+    let pulled = jet(
+        &url,
+        &[
+            "db",
+            "pull",
+            "--out",
+            entities.to_str().expect("utf8 path"),
+            "--schema-out",
+            schema_toml.to_str().expect("utf8 path"),
+        ],
+    );
+    assert!(pulled.status.success(), "{}", stderr(&pulled));
+
+    let seeds = workspace.path().join("seeds");
+    std::fs::create_dir(&seeds).expect("seeds directory");
+    let write_seed = |rank: i64| {
+        std::fs::write(
+            seeds.join("roles.toml"),
+            format!(
+                "[[rows]]\ntable = \"roles\"\nkey = [\"name\"]\n\n\
+                 [[rows.values]]\nname = \"admin\"\nrank = {rank}\n\
+                 kind = \"human\"\ntags = [\"root\", \"ops\"]\n\n\
+                 [[rows.values]]\nname = \"bot\"\nrank = 9\nkind = \"robot\"\n"
+            ),
+        )
+        .expect("seed file writes");
+    };
+    write_seed(1);
+
+    let seed_args = [
+        "seed",
+        "--dir",
+        seeds.to_str().expect("utf8 path"),
+        "--schema",
+        schema_toml.to_str().expect("utf8 path"),
+    ];
+    let first = jet(&url, &seed_args);
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(stdout(&first).contains("roles: 2 rows applied"));
+
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM roles")
+        .fetch_one(&pool)
+        .await
+        .expect("count runs");
+    assert_eq!(count.0, 2);
+
+    // Reapplying converges: still two rows, values unchanged.
+    let again = jet(&url, &seed_args);
+    assert!(again.status.success(), "{}", stderr(&again));
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM roles")
+        .fetch_one(&pool)
+        .await
+        .expect("count runs");
+    assert_eq!(count.0, 2, "idempotent reapplication");
+
+    // Editing the file and reapplying updates the row in place.
+    write_seed(5);
+    let updated = jet(&url, &seed_args);
+    assert!(updated.status.success(), "{}", stderr(&updated));
+    let row: (i32, String, Vec<String>) =
+        sqlx::query_as("SELECT rank, kind::text, tags FROM roles WHERE name = 'admin'")
+            .fetch_one(&pool)
+            .await
+            .expect("row reads");
+    assert_eq!(row.0, 5, "the file's new value won");
+    assert_eq!(row.1, "human");
+    assert_eq!(row.2, ["root", "ops"]);
+
+    // A row that does not fit the schema is refused before execution.
+    std::fs::write(
+        seeds.join("roles.toml"),
+        "[[rows]]\ntable = \"roles\"\nkey = [\"name\"]\n\n\
+         [[rows.values]]\nname = \"broken\"\nrank = \"high\"\nkind = \"human\"\n",
+    )
+    .expect("seed file writes");
+    let refused = jet(&url, &seed_args);
+    assert!(!refused.status.success(), "a mistyped row is refused");
+    assert!(
+        stderr(&refused).contains("does not fit"),
+        "{}",
+        stderr(&refused)
+    );
+    pool.close().await;
+}

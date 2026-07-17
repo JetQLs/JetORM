@@ -36,6 +36,8 @@ enum Command {
     /// Verify the database, the migration files, and the target schema
     /// agree; exits 1 on any disagreement.
     Check(CheckArgs),
+    /// Apply declarative TOML seed data idempotently through upserts.
+    Seed(SeedArgs),
     /// Open the interactive migration dashboard.
     Ui(UiArgs),
 }
@@ -153,6 +155,20 @@ struct GenerateArgs {
 }
 
 #[derive(Args)]
+struct SeedArgs {
+    /// PostgreSQL connection URL; falls back to $DATABASE_URL.
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
+    /// Directory holding the seed files, applied in name order.
+    #[arg(long, default_value = "seeds")]
+    dir: PathBuf,
+    /// Serialized target `SchemaSet` (TOML); seed rows are validated
+    /// against it before anything executes.
+    #[arg(long)]
+    schema: PathBuf,
+}
+
+#[derive(Args)]
 struct CheckArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
@@ -183,6 +199,7 @@ fn main() -> ExitCode {
             Command::Migrate(MigrateCommand::Validate(args)) => validate(args).await,
             Command::Db(DbCommand::Pull(args)) => pull(args).await,
             Command::Check(args) => check(args).await,
+            Command::Seed(args) => seed(args).await,
             Command::Ui(args) => tui(args).await,
         }
     });
@@ -511,6 +528,45 @@ async fn pull(args: PullArgs) -> Result<ExitCode, String> {
         std::fs::write(schema_out, serialized)
             .map_err(|error| format!("cannot write {}: {error}", schema_out.display()))?;
         println!("wrote {}", schema_out.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn seed(args: SeedArgs) -> Result<ExitCode, String> {
+    let schema = load_schema(&args.schema)?;
+    let mut entries: Vec<_> = std::fs::read_dir(&args.dir)
+        .map_err(|error| format!("cannot read {}: {error}", args.dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "toml")
+        })
+        .collect();
+    entries.sort();
+    if entries.is_empty() {
+        println!("no seed files in {}", args.dir.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut files = Vec::with_capacity(entries.len());
+    for path in &entries {
+        let display = path.display().to_string();
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {display}: {error}"))?;
+        let file = jetorm_migration::SeedFile::parse(&display, &contents)
+            .map_err(|error| error.to_string())?;
+        files.push((display, file));
+    }
+
+    let database = Database::connect(&args.database_url)
+        .await
+        .map_err(|error| format!("cannot connect: {error}"))?;
+    let report = jetorm_migration::apply_seeds(&database, &schema, &files)
+        .await
+        .map_err(|error| format!("seeding failed: {error}"))?;
+    for (table, rows) in &report.applied {
+        println!("{table}: {rows} rows applied");
     }
     Ok(ExitCode::SUCCESS)
 }

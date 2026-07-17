@@ -1,6 +1,5 @@
 //! Typed insert, update, delete, upsert, and returning builders.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::{fmt, marker::PhantomData};
 
@@ -275,10 +274,15 @@ impl<E: Entity> Update<E> {
         require_bounded(self.filter.is_some(), self.all_rows)?;
         ensure_bind_capacity(self.binds.len())?;
 
-        let mut seen = HashSet::new();
-        for (index, position) in &self.assignments {
+        // This runs on every plan-cache lookup, hits included, so it must
+        // not allocate: assignment lists are a handful of columns, where a
+        // linear rescan beats a hash set outright.
+        for (position_in_list, (index, position)) in self.assignments.iter().enumerate() {
             let column = &E::COLUMNS[*index];
-            if !seen.insert(*index) {
+            if self.assignments[..position_in_list]
+                .iter()
+                .any(|(previous, _)| previous == index)
+            {
                 return Err(LoweringError::DuplicateAssignment {
                     column: column.name().to_owned(),
                 });

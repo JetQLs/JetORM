@@ -229,8 +229,17 @@ fn render_scalar_op(
             render_function_call(module, params, scope, function, operands, false, false)
         }
         ScalarOp::AggregateCall {
-            function, distinct, ..
-        } => render_function_call(module, params, scope, function, operands, *distinct, true),
+            function,
+            distinct,
+            star,
+            ..
+        } => {
+            if *star {
+                Ok(format!("{}(*)", function_name(function)?))
+            } else {
+                render_function_call(module, params, scope, function, operands, *distinct, true)
+            }
+        }
         ScalarOp::WindowCall {
             function,
             argument_count,
@@ -257,15 +266,11 @@ fn render_function_call(
     distinct: bool,
     aggregate: bool,
 ) -> Result<String, RenderError> {
-    // The one zero-argument aggregate SQL has is spelled with a star; a bare
-    // `count()` is a syntax error. Any other zero-argument aggregate is a
-    // mistake worth failing loudly on rather than shipping to the server.
+    // A wildcard aggregate is explicit in the IR. A zero-argument aggregate
+    // without that marker would otherwise render invalid or ambiguous SQL.
     if aggregate && operands.is_empty() {
-        if function.namespace().is_none() && function.name() == "count" {
-            return Ok(format!("{}(*)", function_name(function)?));
-        }
         return Err(RenderError::unsupported(
-            "aggregate functions other than count take at least one argument",
+            "aggregate call without a wildcard requires at least one argument",
         ));
     }
     let mut arguments = Vec::with_capacity(operands.len());

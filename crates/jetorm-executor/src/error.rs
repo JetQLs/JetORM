@@ -1,24 +1,24 @@
 use std::{error::Error, fmt};
 
-use jetorm_dialect::RenderError;
+use jetorm_dialect::{RenderError, StatementResult};
 use jetorm_entity::DecodeError;
 use jetorm_query::LoweringError;
 
-/// Failure produced while executing a JetORM query.
+/// Failure produced while executing a JetORM statement.
 ///
 /// The set of failure modes grows as JetORM gains write paths and
 /// dialect-level features, so callers must handle unknown variants.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecuteError {
-    /// The typed query could not be lowered into IR.
+    /// The typed builder could not be lowered into IR.
     Build(LoweringError),
     /// The lowered module failed verification or could not be rendered as
     /// dialect SQL.
     Render(RenderError),
     /// The database driver reported a connection or execution failure.
     Database(sqlx::Error),
-    /// The statement referenced a bind position the query never captured;
+    /// The statement referenced a bind position the builder never captured;
     /// this indicates a bug in lowering or rendering.
     MissingBind {
         /// Bind-table position the statement expected.
@@ -37,6 +37,13 @@ pub enum ExecuteError {
     Relation {
         /// Why the load failed.
         detail: String,
+    },
+    /// The execution API disagreed with the statement's declared result shape.
+    ResultMismatch {
+        /// Result shape required by the execution API.
+        expected: StatementResult,
+        /// Result shape declared by the rendered statement.
+        actual: StatementResult,
     },
     /// One fetched row could not be decoded into the entity's model.
     Decode {
@@ -120,6 +127,10 @@ impl fmt::Display for ExecuteError {
                 write!(formatter, "bind position {position} is malformed: {detail}")
             }
             Self::Relation { detail } => write!(formatter, "relation load failed: {detail}"),
+            Self::ResultMismatch { expected, actual } => write!(
+                formatter,
+                "execution expected {expected:?}, but the statement produces {actual:?}"
+            ),
             Self::Decode { row, source } => {
                 write!(formatter, "row {row} could not be decoded: {source}")
             }
@@ -139,6 +150,7 @@ impl Error for ExecuteError {
             Self::MissingBind { .. }
             | Self::MalformedBind { .. }
             | Self::Relation { .. }
+            | Self::ResultMismatch { .. }
             | Self::ProjectedModelFetch => None,
             Self::Decode { source, .. } => Some(source),
         }

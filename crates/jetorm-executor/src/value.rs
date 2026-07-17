@@ -128,7 +128,7 @@ pub(crate) fn decode_row(
     Ok(crate::row::JetRow::new(values))
 }
 
-fn decode_column(
+pub(crate) fn decode_column(
     row: &PgRow,
     index: usize,
     column_type: ColumnType,

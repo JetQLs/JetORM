@@ -1,4 +1,13 @@
-/// One rendered SQL statement with its positional parameter layout.
+/// Shape of the result produced by executing a rendered statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StatementResult {
+    /// The statement returns rows that must be fetched and decoded.
+    Rows,
+    /// The statement returns only its affected-row count.
+    AffectedRows,
+}
+
+/// One rendered SQL statement with its parameter layout and result contract.
 ///
 /// Placeholder numbering is dialect-native (`$1`, `$2`, ... for PostgreSQL)
 /// and dense: each distinct frontend bind position receives exactly one
@@ -8,11 +17,16 @@
 pub struct Statement {
     sql: String,
     bind_order: Vec<u32>,
+    result: StatementResult,
 }
 
 impl Statement {
-    pub(crate) const fn new(sql: String, bind_order: Vec<u32>) -> Self {
-        Self { sql, bind_order }
+    pub(crate) const fn new(sql: String, bind_order: Vec<u32>, result: StatementResult) -> Self {
+        Self {
+            sql,
+            bind_order,
+            result,
+        }
     }
 
     /// Returns the rendered SQL text.
@@ -36,9 +50,15 @@ impl Statement {
         self.bind_order.len()
     }
 
-    /// Decomposes the statement into its SQL text and bind order.
+    /// Returns whether execution yields rows or an affected-row count.
     #[must_use]
-    pub fn into_parts(self) -> (String, Vec<u32>) {
-        (self.sql, self.bind_order)
+    pub const fn result(&self) -> StatementResult {
+        self.result
+    }
+
+    /// Decomposes the statement into SQL, bind order, and result contract.
+    #[must_use]
+    pub fn into_parts(self) -> (String, Vec<u32>, StatementResult) {
+        (self.sql, self.bind_order, self.result)
     }
 }

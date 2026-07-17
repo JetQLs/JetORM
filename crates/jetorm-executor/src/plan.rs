@@ -53,10 +53,10 @@ impl PlanCache {
         }
     }
 
-    /// Returns the statement for one query, rendering it on a cache miss.
+    /// Returns the statement for one typed builder, rendering it on a cache miss.
     ///
-    /// The query is only lowered and verified when its shape is not already
-    /// known.
+    /// The builder is only lowered and verified when its shape is not already
+    /// known. Value-dependent validation still runs on every lookup.
     ///
     /// # Errors
     ///
@@ -66,6 +66,10 @@ impl PlanCache {
     where
         Q: CacheableQuery,
     {
+        // Some safety checks depend on captured values rather than shape.
+        // Run them on every lookup so a cache hit cannot bypass mutation
+        // validation performed during lowering.
+        query.validate().map_err(ExecuteError::lowering)?;
         let shape = query.shape();
         if let Some(statement) = self.statements.get(&shape) {
             return Ok(statement);
@@ -98,9 +102,9 @@ impl PlanCache {
             .clone()
             .into_afterburner_ir()
             .map_err(ExecuteError::lowering)?;
-        // `render_query` verifies the module, so lowering deliberately does
+        // `render_statement` verifies the module, so lowering deliberately does
         // not verify it a second time.
-        Ok(Postgres.render_query(&module)?)
+        Ok(Postgres.render_statement(&module)?)
     }
 }
 
@@ -113,9 +117,10 @@ impl Default for PlanCache {
 #[cfg(test)]
 mod tests {
     use jetorm_entity::{Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, TableMeta};
-    use jetorm_query::{ColumnExt, EntityQuery};
+    use jetorm_query::{ColumnExt, EntityMutation, EntityQuery, LoweringError};
 
     use super::PlanCache;
+    use crate::ExecuteError;
 
     #[derive(Clone, Copy, Debug)]
     struct ItemEntity;
@@ -135,7 +140,7 @@ mod tests {
         type Entity = ItemEntity;
 
         fn into_values(self) -> Vec<jetorm_entity::Value> {
-            Vec::new()
+            vec![jetorm_entity::Value::Int64(0)]
         }
 
         fn from_values(_values: Vec<jetorm_entity::Value>) -> Result<Self, DecodeError> {
@@ -183,6 +188,52 @@ mod tests {
             .statement(&ItemEntity::find())
             .expect("bare render succeeds");
         assert_ne!(filtered.sql(), bare.sql());
+    }
+
+    #[test]
+    fn mutation_shapes_reuse_values_but_partition_structural_changes() {
+        let cache = PlanCache::new();
+        let first = cache
+            .statement(&ItemEntity::insert(Item))
+            .expect("first insert renders");
+        let second = cache
+            .statement(&ItemEntity::insert(Item))
+            .expect("same insert shape resolves");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "insert values must not partition the statement cache"
+        );
+
+        let two_rows = cache
+            .statement(&ItemEntity::insert(Item).values(Item))
+            .expect("multi-row insert renders");
+        assert_ne!(
+            first.sql(),
+            two_rows.sql(),
+            "insert row count changes the statement structure"
+        );
+
+        let returning = cache
+            .statement(&ItemEntity::insert(Item).returning())
+            .expect("returning insert renders");
+        assert_ne!(first.sql(), returning.sql());
+    }
+
+    #[test]
+    fn mutation_value_validation_runs_on_cache_hits() {
+        let cache = PlanCache::new();
+        cache
+            .statement(&ItemEntity::update().set(Id, 1).all_rows())
+            .expect("valid update seeds the cache");
+
+        let error = cache
+            .statement(&ItemEntity::update().set_null(Id).all_rows())
+            .expect_err("a cached shape must not bypass value validation");
+        assert!(matches!(
+            error,
+            ExecuteError::Build(LoweringError::NullForRequiredColumn { ref column })
+                if column == "id"
+        ));
     }
 
     #[test]

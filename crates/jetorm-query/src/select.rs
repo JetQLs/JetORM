@@ -6,14 +6,15 @@ use std::{fmt, marker::PhantomData};
 use afterburner::ir::BinaryOperator;
 use jetorm_entity::{Column, Entity, SingleKeyEntity, Value};
 
+use crate::behavior::Exists;
 use crate::expr::{Expr, OrderKey, Predicate, SortKeySpec, normalize};
 
 /// Value-independent identity of a query.
 ///
-/// Two queries share a shape exactly when they lower to the same IR, so a
-/// shape is a sound key for caching anything derived from that IR — rendered
-/// SQL above all. Bound values are excluded by construction: they live in the
-/// query's bind table, never in its expression tree.
+/// Equal shapes are guaranteed to lower to the same IR, so a shape is a sound
+/// key for caching anything derived from that IR — rendered SQL above all.
+/// Bound values are excluded by construction: they live in the query's bind
+/// table, never in its expression tree.
 ///
 /// This is the frontend counterpart to
 /// [`afterburner::ir::structural_fingerprint`]. A shape is cheaper — it is
@@ -41,9 +42,7 @@ pub struct QueryShape {
     has_fetch: bool,
     distinct: bool,
     projection: Option<Vec<usize>>,
-    /// Whether the query collapses to a single `count(*)` row. A count and a
-    /// select over the same builder must never share a cached statement.
-    count: bool,
+    kind: StatementKind,
     /// The relation joined onto the base entity, identified by its marker
     /// type. Joins over different edges — or a join and its plain select —
     /// must never share a cached statement.
@@ -69,7 +68,7 @@ impl PartialEq for QueryShape {
             && self.has_fetch == other.has_fetch
             && self.distinct == other.distinct
             && self.projection == other.projection
-            && self.count == other.count
+            && self.kind == other.kind
             && self.join == other.join
             && self.group == other.group
             && match (&self.related_filter, &other.related_filter) {
@@ -83,6 +82,28 @@ impl PartialEq for QueryShape {
                 _ => false,
             }
     }
+}
+
+/// Structural statement behavior not represented by the common read fields.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum StatementKind {
+    Select,
+    Count,
+    Exists,
+    Insert {
+        rows: usize,
+        conflict: u8,
+        returning: bool,
+    },
+    Update {
+        assignments: Vec<usize>,
+        all_rows: bool,
+        returning: bool,
+    },
+    Delete {
+        all_rows: bool,
+        returning: bool,
+    },
 }
 
 impl Eq for QueryShape {}
@@ -223,7 +244,11 @@ where
         binds
     }
 
-    fn push_count_binds(binds: &mut Vec<Value>, offset: Option<u64>, fetch: Option<u64>) {
+    pub(crate) fn push_count_binds(
+        binds: &mut Vec<Value>,
+        offset: Option<u64>,
+        fetch: Option<u64>,
+    ) {
         for count in [offset, fetch].into_iter().flatten() {
             // Row counts beyond i64::MAX have no meaning to the database;
             // saturating keeps the builder API infallible.
@@ -253,10 +278,12 @@ where
         entity.hash(&mut hasher);
         self.filter.hash(&mut hasher);
         self.order.hash(&mut hasher);
-        (has_offset, has_fetch, self.distinct, false).hash(&mut hasher);
+        (has_offset, has_fetch, self.distinct).hash(&mut hasher);
         self.projection.hash(&mut hasher);
+        StatementKind::Select.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
-        false.hash(&mut hasher);
+        None::<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>.hash(&mut hasher);
+        None::<Arc<Predicate>>.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -267,11 +294,20 @@ where
             has_fetch,
             distinct: self.distinct,
             projection: self.projection.clone(),
-            count: false,
+            kind: StatementKind::Select,
             join: None,
             group: None,
             related_filter: None,
         }
+    }
+
+    /// Converts this query into a scalar existence test over the same rows.
+    ///
+    /// Ordering, projection, and duplicate elimination cannot change whether
+    /// at least one row exists, so the derived statement omits them.
+    #[must_use]
+    pub fn exists(self) -> Exists<E> {
+        Exists::new(self)
     }
 
     /// Converts the query into a row count over the same rows.
@@ -351,10 +387,12 @@ where
         // A count carries no ordering; hash the same field count as a
         // select so the streams stay aligned.
         Vec::<SortKeySpec>::new().hash(&mut hasher);
-        (has_offset, has_fetch, self.distinct, true).hash(&mut hasher);
+        (has_offset, has_fetch, self.distinct).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
+        StatementKind::Count.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
-        false.hash(&mut hasher);
+        None::<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>.hash(&mut hasher);
+        None::<Arc<Predicate>>.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -365,7 +403,7 @@ where
             has_fetch,
             distinct: self.distinct,
             projection: None,
-            count: true,
+            kind: StatementKind::Count,
             join: None,
             group: None,
             related_filter: None,
@@ -412,10 +450,11 @@ impl QueryShape {
         entity.hash(&mut hasher);
         select.filter.hash(&mut hasher);
         select.order.hash(&mut hasher);
-        (has_offset, has_fetch, select.distinct, false).hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct).hash(&mut hasher);
         select.projection.hash(&mut hasher);
+        StatementKind::Select.hash(&mut hasher);
         Some(join).hash(&mut hasher);
-        false.hash(&mut hasher);
+        None::<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>.hash(&mut hasher);
         related_filter.hash(&mut hasher);
 
         Self {
@@ -427,7 +466,7 @@ impl QueryShape {
             has_fetch,
             distinct: select.distinct,
             projection: select.projection.clone(),
-            count: false,
+            kind: StatementKind::Select,
             join: Some(join),
             group: None,
             related_filter,
@@ -452,11 +491,12 @@ impl QueryShape {
         entity.hash(&mut hasher);
         select.filter.hash(&mut hasher);
         Vec::<SortKeySpec>::new().hash(&mut hasher);
-        (has_offset, has_fetch, select.distinct, false).hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
+        StatementKind::Select.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
-        true.hash(&mut hasher);
         (&keys, &aggregates, order_by_keys).hash(&mut hasher);
+        None::<Arc<Predicate>>.hash(&mut hasher);
 
         Self {
             hash: hasher.finish(),
@@ -467,9 +507,76 @@ impl QueryShape {
             has_fetch,
             distinct: select.distinct,
             projection: None,
-            count: false,
+            kind: StatementKind::Select,
             join: None,
             group: Some((keys, aggregates, order_by_keys)),
+            related_filter: None,
+        }
+    }
+
+    pub(crate) fn for_exists<E>(select: &Select<E>) -> Self
+    where
+        E: Entity,
+    {
+        let entity = TypeId::of::<E>();
+        let has_offset = select.offset.is_some();
+        let has_fetch = select.fetch.is_some();
+        let kind = StatementKind::Exists;
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        select.filter.hash(&mut hasher);
+        Vec::<SortKeySpec>::new().hash(&mut hasher);
+        (has_offset, has_fetch, false).hash(&mut hasher);
+        None::<Vec<usize>>.hash(&mut hasher);
+        kind.hash(&mut hasher);
+        None::<TypeId>.hash(&mut hasher);
+        None::<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>.hash(&mut hasher);
+        None::<Arc<Predicate>>.hash(&mut hasher);
+
+        Self {
+            hash: hasher.finish(),
+            entity,
+            filter: select.filter.clone(),
+            order: Vec::new(),
+            has_offset,
+            has_fetch,
+            distinct: false,
+            projection: None,
+            kind,
+            join: None,
+            group: None,
+            related_filter: None,
+        }
+    }
+
+    pub(crate) fn for_mutation<E>(filter: Option<Arc<Predicate>>, kind: StatementKind) -> Self
+    where
+        E: Entity,
+    {
+        let entity = TypeId::of::<E>();
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        filter.hash(&mut hasher);
+        Vec::<SortKeySpec>::new().hash(&mut hasher);
+        (false, false, false).hash(&mut hasher);
+        None::<Vec<usize>>.hash(&mut hasher);
+        kind.hash(&mut hasher);
+        None::<TypeId>.hash(&mut hasher);
+        None::<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>.hash(&mut hasher);
+        None::<Arc<Predicate>>.hash(&mut hasher);
+
+        Self {
+            hash: hasher.finish(),
+            entity,
+            filter,
+            order: Vec::new(),
+            has_offset: false,
+            has_fetch: false,
+            distinct: false,
+            projection: None,
+            kind,
+            join: None,
+            group: None,
             related_filter: None,
         }
     }
@@ -508,13 +615,20 @@ where
 /// The contract pairs the two halves a statement cache needs: a
 /// value-independent [`QueryShape`] as the key, and IR lowering (through
 /// [`afterburner::IntoAfterBurnerIr`] on the clone) to produce the statement
-/// on a miss. Both selects and counts satisfy it, so one cache serves every
-/// query kind.
+/// on a miss. Reads and mutations satisfy it, so one cache serves every typed
+/// statement kind.
 pub trait CacheableQuery:
     Clone + afterburner::IntoAfterBurnerIr<Error = crate::LoweringError>
 {
     /// Returns the value-independent shape identifying this query.
     fn shape(&self) -> QueryShape;
+
+    /// Checks invariants that may depend on bound values before a cache hit.
+    ///
+    /// The default read-query implementation has no value-dependent failures.
+    fn validate(&self) -> Result<(), crate::LoweringError> {
+        Ok(())
+    }
 }
 
 impl<E> CacheableQuery for Select<E>

@@ -5,11 +5,11 @@ use std::{
 };
 
 use super::{
-    Attribute, BinaryOperator, BlockId, ExtensionOp, FunctionRef, JoinKind, Literal, LogicalOp,
-    Module, NullOrder, OperationId, OperationKind, ScalarOp, SchemaId, SetOperator, SortDirection,
-    SortKey, SqlType, TerminatorOp, TimeZone, Type, UnaryOperator, ValueId, VerificationError,
-    Volatility, WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnit, WindowSpec,
-    verify_module,
+    Attribute, BinaryOperator, BlockId, ConflictAction, ConflictTarget, ExtensionOp, FunctionRef,
+    JoinKind, Literal, LogicalOp, Module, MutationOp, NullOrder, OperationId, OperationKind,
+    ScalarOp, SchemaId, SetOperator, SortDirection, SortKey, SqlType, TerminatorOp, TimeZone, Type,
+    UnaryOperator, ValueId, VerificationError, Volatility, WindowFrame, WindowFrameBound,
+    WindowFrameExclusion, WindowFrameUnit, WindowSpec, verify_module,
 };
 
 /// Deterministic semantic identity for profile admission and incremental caches.
@@ -95,8 +95,9 @@ pub fn structural_fingerprint(module: &Module) -> Result<StructuralFingerprint, 
         next_block: 0,
         schema_stack: HashSet::new(),
     };
-    // v2 covers the window-spec encoding and Limit's operand-presence flags.
-    context.hasher.bytes(b"afterburner-ir-v2");
+    // v3 covers mutations, explicit command results, EXISTS, aggregate
+    // wildcards, window specifications, and Limit operand-presence flags.
+    context.hasher.bytes(b"afterburner-ir-v3");
     context.hash_region(module.root_region())?;
     Ok(StructuralFingerprint(context.hasher.finish().to_be_bytes()))
 }
@@ -218,6 +219,10 @@ impl FingerprintContext<'_> {
                 self.hasher.tag(10);
                 self.hash_logical(logical);
             }
+            OperationKind::Mutation(mutation) => {
+                self.hasher.tag(14);
+                self.hash_mutation(mutation)?;
+            }
             OperationKind::Scalar(scalar) => {
                 self.hasher.tag(11);
                 self.hash_scalar(scalar)?;
@@ -227,6 +232,7 @@ impl FingerprintContext<'_> {
                 self.hasher.tag(match terminator {
                     TerminatorOp::Yield => 0,
                     TerminatorOp::QueryReturn => 1,
+                    TerminatorOp::CommandReturn => 2,
                 });
             }
             OperationKind::Extension(extension) => {
@@ -291,11 +297,79 @@ impl FingerprintContext<'_> {
                 self.hasher.boolean(*has_fetch);
             }
             LogicalOp::Distinct => self.hasher.tag(10),
+            LogicalOp::Exists => self.hasher.tag(12),
             LogicalOp::Set { operator, all } => {
                 self.hasher.tag(11);
                 self.hasher.tag(set_tag(*operator));
                 self.hasher.boolean(*all);
             }
+        }
+    }
+
+    fn hash_mutation(&mut self, mutation: &MutationOp) -> Result<(), FingerprintError> {
+        self.hasher.optional_str(mutation.table().catalog());
+        self.hasher.optional_str(mutation.table().schema());
+        self.hasher.string(mutation.table().name());
+        self.hash_schema(mutation.schema())?;
+        match mutation {
+            MutationOp::Insert {
+                columns,
+                rows,
+                conflict,
+                returning,
+                ..
+            } => {
+                self.hasher.tag(0);
+                self.hash_strings(columns);
+                self.hasher.u32(*rows);
+                self.hasher.boolean(conflict.is_some());
+                if let Some(conflict) = conflict {
+                    match conflict.target() {
+                        None => self.hasher.tag(0),
+                        Some(ConflictTarget::Columns(columns)) => {
+                            self.hasher.tag(1);
+                            self.hash_strings(columns);
+                        }
+                        Some(ConflictTarget::Constraint(constraint)) => {
+                            self.hasher.tag(2);
+                            self.hasher.string(constraint);
+                        }
+                    }
+                    match conflict.action() {
+                        ConflictAction::DoNothing => self.hasher.tag(0),
+                        ConflictAction::DoUpdate(assignments) => {
+                            self.hasher.tag(1);
+                            self.hasher.usize(assignments.len());
+                            for assignment in assignments {
+                                self.hasher.string(assignment.target());
+                                self.hasher.string(assignment.source());
+                            }
+                        }
+                    }
+                }
+                self.hash_strings(returning);
+            }
+            MutationOp::Update {
+                assignments,
+                returning,
+                ..
+            } => {
+                self.hasher.tag(1);
+                self.hash_strings(assignments);
+                self.hash_strings(returning);
+            }
+            MutationOp::Delete { returning, .. } => {
+                self.hasher.tag(2);
+                self.hash_strings(returning);
+            }
+        }
+        Ok(())
+    }
+
+    fn hash_strings(&mut self, values: &[String]) {
+        self.hasher.usize(values.len());
+        for value in values {
+            self.hasher.string(value);
         }
     }
 
@@ -339,12 +413,14 @@ impl FingerprintContext<'_> {
             ScalarOp::AggregateCall {
                 function,
                 distinct,
+                star,
                 volatility,
                 effects,
             } => {
                 self.hasher.tag(7);
                 self.hash_function(function);
                 self.hasher.boolean(*distinct);
+                self.hasher.boolean(*star);
                 self.hasher.tag(volatility_tag(*volatility));
                 self.hasher.tag(effects.bits());
             }

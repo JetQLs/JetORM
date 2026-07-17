@@ -753,6 +753,7 @@ fn grouped_aggregate_renders_group_keys_and_aggregate_calls() {
                 OperationSpec::new(ScalarOp::AggregateCall {
                     function: FunctionRef::new("sum"),
                     distinct: false,
+                    star: false,
                     volatility: Volatility::Immutable,
                     effects: EffectSet::PURE,
                 })
@@ -823,6 +824,7 @@ fn aggregate_can_group_by_a_value_omitted_from_its_result() {
                 OperationSpec::new(ScalarOp::AggregateCall {
                     function: FunctionRef::new("count"),
                     distinct: false,
+                    star: false,
                     volatility: Volatility::Immutable,
                     effects: EffectSet::PURE,
                 })
@@ -890,6 +892,7 @@ fn global_sum_module(mix_ungrouped_row: bool) -> Module {
                 OperationSpec::new(ScalarOp::AggregateCall {
                     function: FunctionRef::new("sum"),
                     distinct: true,
+                    star: false,
                     volatility: Volatility::Immutable,
                     effects: EffectSet::PURE,
                 })

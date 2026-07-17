@@ -28,6 +28,9 @@
 //!   including dynamic frame offsets.
 //! - Extension operations without a PostgreSQL lowering fail loudly with a
 //!   precise diagnostic.
+//! - Mutations render from dedicated `INSERT`/`UPDATE`/`DELETE` IR. `RETURNING`
+//!   statements declare [`StatementResult::Rows`], while ordinary commands
+//!   declare [`StatementResult::AffectedRows`] for executor-side checking.
 //!
 //! Statements are rendered from IR after optimizer passes, so a
 //! [`Statement`] is cacheable under the module's structural fingerprint.
@@ -44,4 +47,4 @@ pub mod postgres;
 pub use dialect::Dialect;
 pub use error::RenderError;
 pub use postgres::Postgres;
-pub use statement::Statement;
+pub use statement::{Statement, StatementResult};

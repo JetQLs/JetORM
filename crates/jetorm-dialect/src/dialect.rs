@@ -1,7 +1,7 @@
 use afterburner::ir::Module;
 
 use crate::error::RenderError;
-use crate::statement::Statement;
+use crate::statement::{Statement, StatementResult};
 
 mod sealed {
     /// Restricts `Dialect` implementations to this crate.
@@ -29,12 +29,28 @@ pub trait Dialect: sealed::Sealed {
     /// Returns the stable dialect name used in diagnostics and cache keys.
     fn name(&self) -> &'static str;
 
-    /// Renders one verified query module into an executable statement.
+    /// Renders one verified query or mutation module into an executable statement.
     ///
     /// # Errors
     ///
     /// Returns an error when the module fails IR verification, uses an
     /// operation or type this dialect cannot render, or requires a shape SQL
     /// cannot express faithfully.
-    fn render_query(&self, module: &Module) -> Result<Statement, RenderError>;
+    fn render_statement(&self, module: &Module) -> Result<Statement, RenderError>;
+
+    /// Renders one row-producing module through the query-only convenience API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rendering fails or the module produces only an
+    /// affected-row count.
+    fn render_query(&self, module: &Module) -> Result<Statement, RenderError> {
+        let statement = self.render_statement(module)?;
+        if statement.result() != StatementResult::Rows {
+            return Err(RenderError::unsupported(
+                "render_query requires a row-producing module",
+            ));
+        }
+        Ok(statement)
+    }
 }

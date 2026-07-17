@@ -12,15 +12,16 @@
 //!   text formats.
 
 pub mod ddl;
+mod mutation;
 mod scalar;
 mod select;
 mod types;
 
-use afterburner::ir::{Module, verify_module};
+use afterburner::ir::{Module, OperationKind, TerminatorOp, ValueDefinition, verify_module};
 
 use crate::dialect::Dialect;
 use crate::error::RenderError;
-use crate::statement::Statement;
+use crate::statement::{Statement, StatementResult};
 
 /// The PostgreSQL dialect.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,11 +32,58 @@ impl Dialect for Postgres {
         "postgresql"
     }
 
-    fn render_query(&self, module: &Module) -> Result<Statement, RenderError> {
+    fn render_statement(&self, module: &Module) -> Result<Statement, RenderError> {
         verify_module(module).map_err(RenderError::InvalidModule)?;
-        let mut renderer = select::Renderer::new(module);
-        let sql = renderer.render_module()?;
-        Ok(Statement::new(sql, renderer.into_bind_order()))
+        let root = module
+            .block(module.root_block())
+            .ok_or_else(|| RenderError::inconsistent("root block handle is stale"))?;
+        let terminator = root
+            .operations()
+            .last()
+            .and_then(|operation| module.operation(*operation))
+            .ok_or_else(|| RenderError::inconsistent("root block has no terminator"))?;
+        let result = match terminator.kind() {
+            OperationKind::Terminator(TerminatorOp::QueryReturn) => StatementResult::Rows,
+            OperationKind::Terminator(TerminatorOp::CommandReturn) => StatementResult::AffectedRows,
+            _ => {
+                return Err(RenderError::unsupported(
+                    "module root must end in a query or command return",
+                ));
+            }
+        };
+        let returned = *terminator
+            .operands()
+            .first()
+            .ok_or_else(|| RenderError::inconsistent("root return has no operand"))?;
+        let ValueDefinition::OperationResult { operation, .. } = module
+            .value(returned)
+            .ok_or_else(|| RenderError::inconsistent("root return references a stale value"))?
+            .definition()
+        else {
+            return Err(RenderError::inconsistent(
+                "root return must reference an operation result",
+            ));
+        };
+
+        match module
+            .operation(operation)
+            .ok_or_else(|| RenderError::inconsistent("returned operation handle is stale"))?
+            .kind()
+        {
+            OperationKind::Mutation(_) => {
+                let mut renderer = mutation::Renderer::new(module);
+                let sql = renderer.render(operation)?;
+                Ok(Statement::new(sql, renderer.into_bind_order(), result))
+            }
+            OperationKind::Logical(_) if result == StatementResult::Rows => {
+                let mut renderer = select::Renderer::new(module);
+                let sql = renderer.render_module()?;
+                Ok(Statement::new(sql, renderer.into_bind_order(), result))
+            }
+            _ => Err(RenderError::unsupported(
+                "returned operation is not a PostgreSQL statement root",
+            )),
+        }
     }
 }
 
@@ -63,4 +111,20 @@ pub(crate) fn quote_identifier(name: &str) -> Result<String, RenderError> {
     quoted.push_str(name);
     quoted.push('"');
     Ok(quoted)
+}
+
+pub(crate) fn table_sql(table: &afterburner::ir::TableRef) -> Result<String, RenderError> {
+    if table.catalog().is_some() {
+        return Err(RenderError::unsupported(
+            "PostgreSQL cannot reference tables in another catalog",
+        ));
+    }
+    match table.schema() {
+        Some(schema) => Ok(format!(
+            "{}.{}",
+            quote_identifier(schema)?,
+            quote_identifier(table.name())?
+        )),
+        None => quote_identifier(table.name()),
+    }
 }

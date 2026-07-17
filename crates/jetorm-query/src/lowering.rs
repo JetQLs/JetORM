@@ -9,10 +9,13 @@ use afterburner::ir::{
 use jetorm_entity::{Column, ColumnMeta, ColumnType, Entity, Relation, TableMeta};
 
 use crate::aggregate::{AggregateSpec, GroupedSelect};
+use crate::behavior::Exists;
 use crate::expr::{Predicate, SortKeySpec};
 use crate::join::JoinSelect;
 use crate::projection::ColumnList;
 use crate::select::{CountQuery, Select};
+
+mod write;
 
 /// Fractional-second digits used for every temporal column type.
 ///
@@ -20,7 +23,7 @@ use crate::select::{CountQuery, Select};
 /// match PostgreSQL's native storage precision.
 const TEMPORAL_PRECISION: u8 = 6;
 
-/// Failure produced while lowering a typed query into AfterBurner IR.
+/// Failure produced while lowering a typed statement into AfterBurner IR.
 ///
 /// The set of failure modes grows as the frontend gains expression and
 /// relational features, so callers must handle unknown variants.
@@ -53,6 +56,41 @@ pub enum LoweringError {
         /// Position of the repeated column.
         column: usize,
     },
+    /// An update or delete omitted both a predicate and explicit full-table
+    /// authorization.
+    UnboundedMutation,
+    /// An update contains no assignments.
+    EmptyUpdate,
+    /// One update column was assigned more than once.
+    DuplicateAssignment {
+        /// Duplicate SQL column name.
+        column: String,
+    },
+    /// A null write targeted a required column.
+    NullForRequiredColumn {
+        /// Required SQL column name.
+        column: String,
+    },
+    /// An insert entity has no frontend-writable columns.
+    EmptyInsert,
+    /// An upsert action requires a primary key but the entity declares none.
+    MissingPrimaryKey,
+    /// An upsert has no writable non-key columns for its update action.
+    EmptyUpsertUpdate,
+    /// A model violated the positional row-width contract during insert lowering.
+    ModelWidthMismatch {
+        /// Zero-based inserted row index.
+        row: usize,
+        /// Width declared by entity metadata.
+        expected: usize,
+        /// Width returned by the model.
+        actual: usize,
+    },
+    /// A bind or row count cannot be represented by the IR's 32-bit index space.
+    CapacityExceeded {
+        /// Index space that overflowed.
+        detail: &'static str,
+    },
 }
 
 impl fmt::Display for LoweringError {
@@ -76,6 +114,39 @@ impl fmt::Display for LoweringError {
                     "group key column {column} appears more than once"
                 )
             }
+            Self::UnboundedMutation => formatter.write_str(
+                "update or delete without a filter requires explicit all_rows() authorization",
+            ),
+            Self::EmptyUpdate => formatter.write_str("update requires at least one assignment"),
+            Self::DuplicateAssignment { column } => {
+                write!(formatter, "update assigns column {column:?} more than once")
+            }
+            Self::NullForRequiredColumn { column } => {
+                write!(
+                    formatter,
+                    "cannot write SQL NULL to required column {column:?}"
+                )
+            }
+            Self::EmptyInsert => {
+                formatter.write_str("entity has no frontend-writable insert columns")
+            }
+            Self::MissingPrimaryKey => {
+                formatter.write_str("upsert requires at least one primary-key column")
+            }
+            Self::EmptyUpsertUpdate => {
+                formatter.write_str("upsert requires at least one writable non-key column")
+            }
+            Self::ModelWidthMismatch {
+                row,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "insert row {row} has {actual} values, but entity metadata declares {expected}"
+            ),
+            Self::CapacityExceeded { detail } => {
+                write!(formatter, "{detail} exceeds the IR's 32-bit index capacity")
+            }
         }
     }
 }
@@ -88,7 +159,16 @@ impl Error for LoweringError {
             | Self::DistinctOverProjection
             | Self::DistinctOverJoin
             | Self::LimitOverGroup
-            | Self::DuplicateGroupKey { .. } => None,
+            | Self::DuplicateGroupKey { .. }
+            | Self::UnboundedMutation
+            | Self::EmptyUpdate
+            | Self::DuplicateAssignment { .. }
+            | Self::NullForRequiredColumn { .. }
+            | Self::EmptyInsert
+            | Self::MissingPrimaryKey
+            | Self::EmptyUpsertUpdate
+            | Self::ModelWidthMismatch { .. }
+            | Self::CapacityExceeded { .. } => None,
         }
     }
 }
@@ -106,7 +186,7 @@ where
     type Error = LoweringError;
 
     fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
-        lower(&self)
+        lower_select(&self)
     }
 }
 
@@ -118,6 +198,17 @@ where
 
     fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
         lower_count(&self)
+    }
+}
+
+impl<E> IntoAfterBurnerIr for Exists<E>
+where
+    E: Entity,
+{
+    type Error = LoweringError;
+
+    fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
+        lower_exists(&self)
     }
 }
 
@@ -174,7 +265,7 @@ struct LoweredRows {
 /// scan, filter, distinct, sort, limit, then the query terminator. Captured
 /// values lower to IR parameters whose positions equal the query's bind-table
 /// positions.
-fn lower<E>(select: &Select<E>) -> Result<Module, LoweringError>
+fn lower_select<E>(select: &Select<E>) -> Result<Module, LoweringError>
 where
     E: Entity,
 {
@@ -231,7 +322,6 @@ where
             )?;
             relation = editor.result(project, 0)?;
         }
-
         editor.append_operation(
             root,
             OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![relation]),
@@ -291,6 +381,7 @@ where
             OperationSpec::new(ScalarOp::AggregateCall {
                 function: FunctionRef::new("count"),
                 distinct: false,
+                star: true,
                 volatility: Volatility::Immutable,
                 effects: EffectSet::PURE,
             })
@@ -302,6 +393,46 @@ where
             OperationSpec::new(TerminatorOp::Yield).with_operands(vec![total]),
         )?;
         let relation = editor.result(aggregate, 0)?;
+        editor.append_operation(
+            root,
+            OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![relation]),
+        )?;
+    }
+    Ok(module)
+}
+
+/// Lowers a select pipeline into one non-null Boolean row.
+fn lower_exists<E>(exists: &Exists<E>) -> Result<Module, LoweringError>
+where
+    E: Entity,
+{
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let rows = lower_pipeline::<E>(
+            &mut editor,
+            root,
+            &RowPipeline {
+                filter: exists.select.filter.as_deref(),
+                distinct: false,
+                order: &[],
+                has_offset: exists.select.offset.is_some(),
+                has_fetch: exists.select.fetch.is_some(),
+                predicate_binds: exists.select.binds.len(),
+            },
+        )?;
+        let output_schema = editor.intern_schema(Schema::new(vec![Field::new(
+            "exists",
+            Type::boolean(false),
+        )]));
+        let operation = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Exists)
+                .with_operands(vec![rows.relation])
+                .with_result(Type::relation(output_schema)),
+        )?;
+        let relation = editor.result(operation, 0)?;
         editor.append_operation(
             root,
             OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![relation]),
@@ -580,6 +711,7 @@ where
                 OperationSpec::new(ScalarOp::AggregateCall {
                     function: FunctionRef::new(spec.function.sql_name()),
                     distinct: false,
+                    star: spec.column.is_none(),
                     volatility: Volatility::Immutable,
                     effects: EffectSet::PURE,
                 })
@@ -771,7 +903,7 @@ where
             let parameter = editor.append_operation(
                 root,
                 OperationSpec::new(ScalarOp::Parameter {
-                    position: (pipeline.predicate_binds + slot) as u32,
+                    position: checked_bind_position(pipeline.predicate_binds + slot, 0)?,
                     name: None,
                 })
                 .with_result(count_type.clone()),
@@ -838,7 +970,7 @@ fn lower_node(
             let parameter = editor.append_operation(
                 block,
                 OperationSpec::new(ScalarOp::Parameter {
-                    position: *position,
+                    position: checked_bind_position(*position, 0)?,
                     name: None,
                 })
                 .with_result(Type::Scalar(ty.clone())),
@@ -891,13 +1023,40 @@ fn lower_node(
     }
 }
 
+pub(super) fn lower_entity_node(
+    editor: &mut IrEditor<'_>,
+    block: BlockId,
+    node: &Predicate,
+    columns: &'static [ColumnMeta],
+) -> Result<(ValueId, ScalarType), LoweringError> {
+    lower_node(
+        editor,
+        block,
+        node,
+        &PredicateColumns {
+            columns,
+            offset: 0,
+            widen_nullable: false,
+        },
+    )
+}
+
+pub(super) fn checked_bind_position(position: usize, offset: u32) -> Result<u32, LoweringError> {
+    u32::try_from(position)
+        .ok()
+        .and_then(|position| position.checked_add(offset))
+        .ok_or(LoweringError::CapacityExceeded {
+            detail: "bind position",
+        })
+}
+
 /// Makes two operand types identical by widening one side to nullable.
 ///
 /// AfterBurner requires exact operand type equality. When the two sides agree
 /// on the SQL kind but disagree on nullability — for example a null test
 /// combined with a nullable comparison under `AND` — the non-nullable side is
 /// widened with an explicit cast, matching SQL's implicit semantics.
-fn unify_nullability(
+pub(super) fn unify_nullability(
     editor: &mut IrEditor<'_>,
     block: BlockId,
     left: (ValueId, ScalarType),
@@ -968,11 +1127,11 @@ fn binary_result_type(op: BinaryOperator, operand: &ScalarType) -> ScalarType {
     }
 }
 
-fn table_ref(table: &TableMeta) -> TableRef {
+pub(super) fn table_ref(table: &TableMeta) -> TableRef {
     TableRef::qualified(None::<&str>, table.schema(), table.name())
 }
 
-fn column_scalar_type(column: &ColumnMeta) -> ScalarType {
+pub(super) fn column_scalar_type(column: &ColumnMeta) -> ScalarType {
     ScalarType::new(sql_type(column.column_type()), column.is_nullable())
 }
 

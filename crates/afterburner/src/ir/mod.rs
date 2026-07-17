@@ -14,8 +14,10 @@
 //!   values visible at their owning operation.
 //! - Every block ends in one terminator, and CFG successors remain within the
 //!   same region.
-//! - Logical expression-region arguments match input schemas, and yielded values
-//!   match the owning operation's contract.
+//! - Logical and mutation expression-region arguments match their row schemas,
+//!   and yielded values match the owning operation's contract.
+//! - Root terminators distinguish row-producing queries from unit-valued
+//!   commands, so code generation and execution cannot guess the result shape.
 //!
 //! [`IrEditor`] maintains local arena and def-use consistency. It intentionally
 //! permits partially assembled IR, so callers must run [`verify_module`] before
@@ -29,12 +31,13 @@ mod validation;
 
 pub use entity::{BlockId, OperationId, ProfileSiteId, RegionId, SchemaId, ValueId};
 pub use model::{
-    Attribute, BinaryOperator, Block, EffectSet, ExtensionOp, Field, FloatBits, FunctionRef,
-    JoinKind, Literal, LogicalOp, Module, NullOrder, Operation, OperationKind, OperationMetadata,
-    OperationSpec, Region, RegionParent, ScalarKind, ScalarOp, ScalarType, Schema, SetOperator,
-    SortDirection, SortKey, SourceSpan, SqlType, TableRef, TerminatorOp, TimeZone, Type,
-    UnaryOperator, Value, ValueDefinition, ValueUse, Volatility, WindowFrame, WindowFrameBound,
-    WindowFrameExclusion, WindowFrameUnit, WindowSpec,
+    Attribute, BinaryOperator, Block, ConflictAction, ConflictClause, ConflictTarget, EffectSet,
+    ExtensionOp, Field, FloatBits, FunctionRef, JoinKind, Literal, LogicalOp, Module, MutationOp,
+    NullOrder, Operation, OperationKind, OperationMetadata, OperationSpec, Region, RegionParent,
+    ScalarKind, ScalarOp, ScalarType, Schema, SetOperator, SortDirection, SortKey, SourceSpan,
+    SqlType, TableRef, TerminatorOp, TimeZone, Type, UnaryOperator, UpsertAssignment, Value,
+    ValueDefinition, ValueUse, Volatility, WindowFrame, WindowFrameBound, WindowFrameExclusion,
+    WindowFrameUnit, WindowSpec,
 };
 pub use mutation::{EditError, IrEditor};
 pub use support::{

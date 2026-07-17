@@ -1,12 +1,14 @@
 //! Core SSA containers, SQL types, and built-in operation dialects.
 
 mod module;
+mod mutation;
 mod operation;
 mod types;
 
 use super::entity::{Arena, BlockId, OperationId, ProfileSiteId, RegionId, SchemaId, ValueId};
 
 pub use module::{Block, Module, Region, RegionParent, Value, ValueDefinition, ValueUse};
+pub use mutation::{ConflictAction, ConflictClause, ConflictTarget, MutationOp, UpsertAssignment};
 pub use operation::{
     Attribute, BinaryOperator, EffectSet, ExtensionOp, JoinKind, LogicalOp, NullOrder, Operation,
     OperationKind, OperationMetadata, OperationSpec, ScalarOp, SetOperator, SortDirection, SortKey,

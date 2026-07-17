@@ -1,9 +1,113 @@
 use jetorm_entity::{Column, Entity};
 
-use crate::expr::ColumnExt;
+use crate::expr::{ColumnExt, Expr, OrderKey};
 use crate::select::Select;
 
-/// Keyset pagination over one ordered column.
+/// A tuple of column markers a cursor pages over, one to four columns.
+///
+/// A single column is the 1-tuple `(item::Id,)`, whose key is its bare
+/// value — the same spelling projections use. Multi-column keys page in
+/// lexicographic order — `(a, b) > (x, y)` — spelled through plain
+/// comparisons (`a > x OR (a = x AND b > y)`), so the statement's shape
+/// stays independent of the key's values, like every other query.
+pub trait CursorKey<E>: Copy
+where
+    E: Entity,
+{
+    /// Rust value of one full cursor position; a single column's is bare.
+    type Key;
+
+    /// Ordering keys, leading column first.
+    fn order_keys(self, descending: bool) -> Vec<OrderKey<E>>;
+
+    /// Rows strictly after the position in ascending key order.
+    fn after_expr(self, key: Self::Key) -> Expr<E, bool>;
+
+    /// Rows strictly before the position in ascending key order.
+    fn before_expr(self, key: Self::Key) -> Expr<E, bool>;
+}
+
+/// Folds per-column boundary comparisons into the lexicographic form:
+/// `(a, b, c) > key` is `a > x OR (a = x AND (b > y OR (b = y AND c > z)))`.
+fn lexicographic<E>(mut strict: Vec<Expr<E, bool>>, mut equal: Vec<Expr<E, bool>>) -> Expr<E, bool>
+where
+    E: Entity,
+{
+    let mut expression = strict.pop().expect("cursor keys are non-empty");
+    equal.pop();
+    while let (Some(bound), Some(tie)) = (strict.pop(), equal.pop()) {
+        expression = bound.or(tie.and(expression));
+    }
+    expression
+}
+
+/// A single projected column keys by its bare value, not a 1-tuple.
+impl<E, A> CursorKey<E> for (A,)
+where
+    E: Entity,
+    A: Column<Entity = E> + Copy,
+    A::Rust: Clone,
+{
+    type Key = A::Rust;
+
+    fn order_keys(self, descending: bool) -> Vec<OrderKey<E>> {
+        vec![if descending {
+            self.0.desc()
+        } else {
+            self.0.asc()
+        }]
+    }
+
+    fn after_expr(self, key: Self::Key) -> Expr<E, bool> {
+        self.0.gt(key)
+    }
+
+    fn before_expr(self, key: Self::Key) -> Expr<E, bool> {
+        self.0.lt(key)
+    }
+}
+
+macro_rules! impl_cursor_key_for_tuple {
+    ($($column:ident $key:ident $index:tt),+) => {
+        impl<E, $($column),+> CursorKey<E> for ($($column,)+)
+        where
+            E: Entity,
+            $($column: Column<Entity = E> + Copy, $column::Rust: Clone,)+
+        {
+            type Key = ($($column::Rust,)+);
+
+            fn order_keys(self, descending: bool) -> Vec<OrderKey<E>> {
+                if descending {
+                    vec![$(self.$index.desc()),+]
+                } else {
+                    vec![$(self.$index.asc()),+]
+                }
+            }
+
+            fn after_expr(self, key: Self::Key) -> Expr<E, bool> {
+                let ($($key,)+) = key;
+                lexicographic(
+                    vec![$(self.$index.gt($key.clone())),+],
+                    vec![$(self.$index.eq($key)),+],
+                )
+            }
+
+            fn before_expr(self, key: Self::Key) -> Expr<E, bool> {
+                let ($($key,)+) = key;
+                lexicographic(
+                    vec![$(self.$index.lt($key.clone())),+],
+                    vec![$(self.$index.eq($key)),+],
+                )
+            }
+        }
+    };
+}
+
+impl_cursor_key_for_tuple!(A a 0, B b 1);
+impl_cursor_key_for_tuple!(A a 0, B b 1, C c 2);
+impl_cursor_key_for_tuple!(A a 0, B b 1, C c 2, D d 3);
+
+/// Keyset pagination over an ordered key.
 ///
 /// Created by [`Select::cursor_by`]. Where offset pagination re-scans and
 /// discards every skipped row, a cursor page filters on the last seen key —
@@ -11,67 +115,72 @@ use crate::select::Select;
 /// same as page one. The trade-off is positional access: a cursor walks
 /// forward from a key, it cannot jump to page `n`.
 ///
-/// The cursor column should be unique (a primary key or unique column);
-/// paging on a non-unique key can skip rows that share the boundary value.
+/// The key as a whole should be unique — a primary key, a unique column,
+/// or a composite ending in one — since paging on a non-unique key can
+/// skip rows that share the boundary value. Composite keys make the
+/// tie-breaker part of the key: `cursor_by((doc::CreatedAt, doc::Id))`.
 #[derive(Clone, Debug)]
-pub struct Cursor<E, C>
+pub struct Cursor<E, K>
 where
     E: Entity,
-    C: Column<Entity = E> + Default,
+    K: CursorKey<E>,
 {
     select: Select<E>,
-    column: C,
+    key: K,
 }
 
 impl<E> Select<E>
 where
     E: Entity,
 {
-    /// Starts keyset pagination ordered by the given column.
+    /// Starts keyset pagination ordered by the given key — a tuple of
+    /// column markers, a single column being `(item::Id,)`, paging in
+    /// lexicographic order.
     ///
     /// Filters already on the select carry over; ordering set earlier is
     /// replaced, since the cursor's correctness depends on its own key
     /// order.
     #[must_use]
-    pub fn cursor_by<C>(mut self, column: C) -> Cursor<E, C>
+    pub fn cursor_by<K>(mut self, key: K) -> Cursor<E, K>
     where
-        C: Column<Entity = E> + Default,
+        K: CursorKey<E>,
     {
         self.order.clear();
-        Cursor {
-            select: self,
-            column,
-        }
+        Cursor { select: self, key }
     }
 }
 
-impl<E, C> Cursor<E, C>
+impl<E, K> Cursor<E, K>
 where
     E: Entity,
-    C: Column<Entity = E> + Default + Copy,
+    K: CursorKey<E>,
 {
     /// Restricts the page to rows after the key, exclusive.
     ///
     /// This is the resume point: pass the last row's key from the previous
     /// page.
     #[must_use]
-    pub fn after(mut self, value: impl Into<C::Rust>) -> Self {
-        self.select = self.select.filter(self.column.gt(value));
+    pub fn after(mut self, key: impl Into<K::Key>) -> Self {
+        self.select = self.select.filter(self.key.after_expr(key.into()));
         self
     }
 
     /// Restricts the page to rows before the key, exclusive.
     #[must_use]
-    pub fn before(mut self, value: impl Into<C::Rust>) -> Self {
-        self.select = self.select.filter(self.column.lt(value));
+    pub fn before(mut self, key: impl Into<K::Key>) -> Self {
+        self.select = self.select.filter(self.key.before_expr(key.into()));
         self
     }
 
     /// Takes the first `count` rows in ascending key order.
     #[must_use]
     pub fn first(self, count: u64) -> CursorPage<E> {
+        let mut select = self.select;
+        for order in self.key.order_keys(false) {
+            select = select.order_by(order);
+        }
         CursorPage {
-            select: self.select.order_by(self.column.asc()).limit(count),
+            select: select.limit(count),
             reversed: false,
         }
     }
@@ -82,8 +191,12 @@ where
     /// execution reverses the page so both directions read the same way.
     #[must_use]
     pub fn last(self, count: u64) -> CursorPage<E> {
+        let mut select = self.select;
+        for order in self.key.order_keys(true) {
+            select = select.order_by(order);
+        }
         CursorPage {
-            select: self.select.order_by(self.column.desc()).limit(count),
+            select: select.limit(count),
             reversed: true,
         }
     }

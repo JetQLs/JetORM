@@ -419,6 +419,47 @@ fn escape_like(needle: &str) -> String {
     escaped
 }
 
+/// Builds the primary-key equality chain of one entity from a key value.
+///
+/// Values pair positionally with [`jetorm_entity::Entity::PRIMARY_KEY`],
+/// each typed by its column's metadata and combined with `AND`.
+pub(crate) fn key_equalities<E>(key: E::Key) -> Expr<E, bool>
+where
+    E: jetorm_entity::KeyedEntity,
+{
+    let values = E::key_values(key);
+    debug_assert_eq!(
+        values.len(),
+        E::PRIMARY_KEY.len(),
+        "the derive emits one key value per primary-key column"
+    );
+    let mut chain: Option<Node> = None;
+    for (index, value) in E::PRIMARY_KEY.iter().zip(values) {
+        let meta = &E::COLUMNS[*index];
+        let equality = Node::Binary {
+            op: BinaryOperator::Equal,
+            left: Box::new(Node::Column(*index)),
+            right: Box::new(Node::Value {
+                value,
+                ty: OperandType {
+                    column_type: meta.column_type(),
+                    nullable: meta.is_nullable(),
+                    list: false,
+                },
+            }),
+        };
+        chain = Some(match chain {
+            Some(existing) => Node::Binary {
+                op: BinaryOperator::And,
+                left: Box::new(existing),
+                right: Box::new(equality),
+            },
+            None => equality,
+        });
+    }
+    Expr::from_node(chain.expect("KeyedEntity guarantees at least one key column"))
+}
+
 fn compare<C>(op: BinaryOperator, value: C::Rust) -> Expr<C::Entity, bool>
 where
     C: Column,

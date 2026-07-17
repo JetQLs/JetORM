@@ -60,12 +60,26 @@ pub trait Model: Sized {
 /// Entities whose primary key is exactly one column.
 ///
 /// `#[derive(JetModel)]` implements this automatically for single-column
-/// keys; composite-key entities do not implement it and therefore have no
-/// by-id lookup until composite key support lands. The marker's `Default`
-/// bound lets generic code conjure the column to build predicates.
+/// keys. The marker's `Default` bound lets generic code conjure the column
+/// to build predicates. Composite-key entities implement [`KeyedEntity`]
+/// instead.
 pub trait SingleKeyEntity: Entity {
     /// Marker of the primary-key column.
     type PrimaryKeyColumn: Column<Entity = Self> + Default;
+}
+
+/// Entities with a primary key of any width.
+///
+/// `#[derive(JetModel)]` implements this for every entity declaring at
+/// least one `#[jet(primary_key)]` field. A single-column key is its bare
+/// Rust value; a composite key is the tuple of its columns' values in
+/// declaration order — the same order [`Entity::PRIMARY_KEY`] lists.
+pub trait KeyedEntity: Entity {
+    /// Rust value identifying exactly one row.
+    type Key;
+
+    /// Converts the key into positional values, in primary-key order.
+    fn key_values(key: Self::Key) -> Vec<Value>;
 }
 
 /// Zero-sized marker for one entity column.

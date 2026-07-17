@@ -432,6 +432,54 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     });
 
+    // The key type: a single column's bare Rust value, or the tuple of the
+    // key columns' values in declaration order. Types resolve through the
+    // marker-free alias module like every other field type.
+    let key_field_indices: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.attrs.primary_key)
+        .map(|(index, _)| index)
+        .collect();
+    let keyed_impl = (!key_field_indices.is_empty()).then(|| {
+        let aliases: Vec<_> = key_field_indices
+            .iter()
+            .map(|index| format_ident!("R{index}"))
+            .collect();
+        let (key_type, bindings, values): (TokenStream, TokenStream, TokenStream) =
+            if let [alias] = aliases.as_slice() {
+                (
+                    quote!(#module_ident::__jet_fields::#alias),
+                    quote!(let value = key;),
+                    quote!(::std::vec![
+                        <#module_ident::__jet_fields::#alias as #cr::SqlValue>::into_value(value)
+                    ]),
+                )
+            } else {
+                let names: Vec<_> = (0..aliases.len())
+                    .map(|position| format_ident!("value{position}"))
+                    .collect();
+                (
+                    quote!((#(#module_ident::__jet_fields::#aliases,)*)),
+                    quote!(let (#(#names,)*) = key;),
+                    quote!(::std::vec![#(
+                        <#module_ident::__jet_fields::#aliases as #cr::SqlValue>::into_value(#names)
+                    ),*]),
+                )
+            };
+        quote! {
+            #[automatically_derived]
+            impl #cr::KeyedEntity for #entity_ident {
+                type Key = #key_type;
+
+                fn key_values(key: Self::Key) -> ::std::vec::Vec<#cr::Value> {
+                    #bindings
+                    #values
+                }
+            }
+        }
+    });
+
     let entity_doc = format!("Entity marker for the `{}` table.", container.table);
     let module_doc = format!("Column markers for the `{}` table.", container.table);
     let column_count = columns.len();
@@ -482,6 +530,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
 
         #single_key_impl
+
+        #keyed_impl
 
         #[doc = #module_doc]
         #vis mod #module_ident {

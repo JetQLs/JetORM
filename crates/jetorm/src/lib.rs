@@ -49,8 +49,8 @@ pub use jetorm_derive::{JetEnum, JetModel, JetPartial};
 pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement, StatementResult};
 pub use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, ForeignKeyMeta, ForeignKeyRef, Inverse,
-    Json, Model, ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta, Value,
-    ValueTypeMismatch,
+    Json, KeyedEntity, Model, ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta,
+    Value, ValueTypeMismatch,
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{

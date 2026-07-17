@@ -83,6 +83,12 @@ pub enum LoweringError {
         /// The auto-incrementing key column.
         column: String,
     },
+    /// A targeted upsert binds SQL `NULL` for an arbiter column, which
+    /// conflicts with nothing under distinct-nulls unique semantics.
+    UpsertNullArbiter {
+        /// The arbiter column bound to `NULL`.
+        column: String,
+    },
     /// An upsert assigns a database-generated column from the excluded row.
     UpsertAssignsGenerated {
         /// The auto-incrementing column named in the update list.
@@ -154,15 +160,26 @@ impl fmt::Display for LoweringError {
             }
             Self::UpsertKeyGenerated { column } => write!(
                 formatter,
-                "primary-key upsert cannot conflict: key column {column:?} is                  database-generated and never inserted; arbitrate with                  on_conflict over a unique column instead"
+                "upsert cannot conflict: arbiter column {column:?} is \
+                 database-generated and never inserted; arbitrate with \
+                 on_conflict over a unique column instead"
+            ),
+            Self::UpsertNullArbiter { column } => write!(
+                formatter,
+                "upsert binds NULL for arbiter column {column:?}; NULL \
+                 conflicts with nothing, so the row would insert on every \
+                 application instead of converging"
             ),
             Self::UpsertAssignsGenerated { column } => write!(
                 formatter,
-                "upsert cannot assign auto-incrementing column {column:?}; the                  excluded value is the sequence's next number, not the caller's data"
+                "upsert cannot assign auto-incrementing column {column:?}; \
+                 the excluded value is the sequence's next number, not the \
+                 caller's data"
             ),
             Self::UpsertAssignsTarget { column } => write!(
                 formatter,
-                "upsert assigns conflict-target column {column:?} to itself;                  drop it from the update list"
+                "upsert assigns conflict-target column {column:?} to itself; \
+                 drop it from the update list"
             ),
             Self::ModelWidthMismatch {
                 row,
@@ -196,6 +213,7 @@ impl Error for LoweringError {
             | Self::MissingPrimaryKey
             | Self::EmptyUpsertUpdate
             | Self::UpsertKeyGenerated { .. }
+            | Self::UpsertNullArbiter { .. }
             | Self::UpsertAssignsGenerated { .. }
             | Self::UpsertAssignsTarget { .. }
             | Self::ModelWidthMismatch { .. }

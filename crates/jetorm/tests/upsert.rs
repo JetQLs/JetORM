@@ -253,3 +253,71 @@ async fn upserts_round_trip_on_live_postgres() {
 
     db.close().await;
 }
+
+#[derive(Clone, Debug, PartialEq, JetModel)]
+#[jet(table = "contacts")]
+pub struct Contact {
+    #[jet(primary_key, auto_increment)]
+    pub id: i64,
+    #[jet(unique)]
+    pub handle: Option<String>,
+    pub note: String,
+}
+
+#[test]
+fn a_generated_arbiter_is_refused_in_targeted_form_too() {
+    let update = ItemEntity::insert(item("a", 10, 1))
+        .on_conflict((item::Id,))
+        .update_columns((item::Price,))
+        .into_afterburner_ir();
+    assert!(
+        matches!(
+            update,
+            Err(jetorm::LoweringError::UpsertKeyGenerated { ref column }) if column == "id"
+        ),
+        "{update:?}"
+    );
+    let ignore = ItemEntity::insert(item("a", 10, 1))
+        .on_conflict((item::Id,))
+        .ignore()
+        .into_afterburner_ir();
+    assert!(
+        matches!(
+            ignore,
+            Err(jetorm::LoweringError::UpsertKeyGenerated { .. })
+        ),
+        "{ignore:?}"
+    );
+}
+
+#[test]
+fn a_null_arbiter_bind_cannot_pretend_to_converge() {
+    // NULL conflicts with nothing under distinct-nulls semantics, so the
+    // row would insert on every application — refused, not silently run.
+    let null_arbiter = ContactEntity::insert(Contact {
+        id: 0,
+        handle: None,
+        note: "n".to_owned(),
+    })
+    .on_conflict((contact::Handle,))
+    .update_columns((contact::Note,))
+    .into_afterburner_ir();
+    assert!(
+        matches!(
+            null_arbiter,
+            Err(jetorm::LoweringError::UpsertNullArbiter { ref column }) if column == "handle"
+        ),
+        "{null_arbiter:?}"
+    );
+
+    // A present value arbitrates fine.
+    let present = ContactEntity::insert(Contact {
+        id: 0,
+        handle: Some("alice".to_owned()),
+        note: "n".to_owned(),
+    })
+    .on_conflict((contact::Handle,))
+    .update_columns((contact::Note,))
+    .into_afterburner_ir();
+    assert!(present.is_ok(), "{present:?}");
+}

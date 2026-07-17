@@ -1,4 +1,6 @@
 use std::any::TypeId;
+use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+use std::sync::{Arc, LazyLock};
 use std::{fmt, marker::PhantomData};
 
 use afterburner::ir::BinaryOperator;
@@ -19,18 +21,53 @@ use crate::expr::{Expr, OrderKey, Predicate, SortKeySpec, normalize};
 /// walk — but it only recognizes queries that were *built* alike. The IR
 /// fingerprint additionally recognizes differently built queries that lower
 /// or optimize to identical IR.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Reading a shape is cheap by design: the predicate tree is shared through
+/// an [`Arc`] rather than cloned, and the hash over the whole shape is
+/// computed once at construction. Plan caches probe with that precomputed
+/// hash and fall back to deep equality only on a hash match, so a cache hit
+/// never walks the tree twice.
+#[derive(Clone, Debug)]
 pub struct QueryShape {
+    /// Hash over every field below, fixed at construction.
+    hash: u64,
     // The entity fixes the table identity and column metadata that lowering
     // reads, so equal shapes over equal entities lower identically.
     entity: TypeId,
-    filter: Option<Predicate>,
+    filter: Option<Arc<Predicate>>,
     order: Vec<SortKeySpec>,
     // Row counts are bound values, so only their presence is structural:
     // every page of a paginated query shares one shape.
     has_offset: bool,
     has_fetch: bool,
     distinct: bool,
+}
+
+impl PartialEq for QueryShape {
+    fn eq(&self, other: &Self) -> bool {
+        // The precomputed hash rejects almost every mismatch before any
+        // tree walk; equal hashes still require real equality, because a
+        // colliding shape returning another query's statement would execute
+        // the wrong SQL.
+        self.hash == other.hash
+            && self.entity == other.entity
+            && self.order == other.order
+            && self.has_offset == other.has_offset
+            && self.has_fetch == other.has_fetch
+            && self.distinct == other.distinct
+            && match (&self.filter, &other.filter) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for QueryShape {}
+
+impl Hash for QueryShape {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
 }
 
 /// Typed `SELECT` builder over one entity.
@@ -49,7 +86,7 @@ pub struct Select<E>
 where
     E: Entity,
 {
-    pub(crate) filter: Option<Predicate>,
+    pub(crate) filter: Option<Arc<Predicate>>,
     pub(crate) binds: Vec<Value>,
     pub(crate) order: Vec<SortKeySpec>,
     pub(crate) offset: Option<u64>,
@@ -84,14 +121,19 @@ where
     #[must_use]
     pub fn filter(mut self, predicate: Expr<E, bool>) -> Self {
         let normalized = normalize(predicate.node, &mut self.binds);
-        self.filter = Some(match self.filter.take() {
+        self.filter = Some(Arc::new(match self.filter.take() {
             Some(existing) => Predicate::Binary {
+                // The builder usually holds the only reference, so combining
+                // moves the existing tree; a shape taken earlier keeps its
+                // own copy alive and forces one clone here instead.
+                left: Box::new(
+                    Arc::try_unwrap(existing).unwrap_or_else(|shared| (*shared).clone()),
+                ),
                 op: BinaryOperator::And,
-                left: Box::new(existing),
                 right: Box::new(normalized),
             },
             None => normalized,
-        });
+        }));
         self
     }
 
@@ -157,16 +199,31 @@ where
 
     /// Returns this query's value-independent shape.
     ///
-    /// Reading a shape costs one small tree clone and never lowers the query,
-    /// so callers can resolve a cached plan before paying for IR construction.
+    /// Reading a shape shares the predicate tree instead of cloning it and
+    /// never lowers the query, so callers can resolve a cached plan before
+    /// paying for IR construction.
     #[must_use]
     pub fn shape(&self) -> QueryShape {
+        let entity = TypeId::of::<E>();
+        let has_offset = self.offset.is_some();
+        let has_fetch = self.fetch.is_some();
+
+        // One walk at construction; every later probe reuses the digest.
+        // The seed is process-wide, which is exactly a plan cache's scope.
+        static SEED: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+        let mut hasher = SEED.build_hasher();
+        entity.hash(&mut hasher);
+        self.filter.hash(&mut hasher);
+        self.order.hash(&mut hasher);
+        (has_offset, has_fetch, self.distinct).hash(&mut hasher);
+
         QueryShape {
-            entity: TypeId::of::<E>(),
+            hash: hasher.finish(),
+            entity,
             filter: self.filter.clone(),
             order: self.order.clone(),
-            has_offset: self.offset.is_some(),
-            has_fetch: self.fetch.is_some(),
+            has_offset,
+            has_fetch,
             distinct: self.distinct,
         }
     }

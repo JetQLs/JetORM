@@ -60,7 +60,7 @@ mod plan;
 mod select;
 mod value;
 
-pub use database::{Database, Executor, Transaction};
+pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::ExecuteError;
 pub use plan::PlanCache;
 pub use select::SelectExecute;

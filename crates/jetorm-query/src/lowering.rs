@@ -8,8 +8,10 @@ use afterburner::ir::{
 };
 use jetorm_entity::{Column, ColumnMeta, ColumnType, Entity, Relation, TableMeta};
 
+use crate::aggregate::{AggregateSpec, GroupedSelect};
 use crate::expr::{Predicate, SortKeySpec};
 use crate::join::JoinSelect;
+use crate::projection::ColumnList;
 use crate::select::{CountQuery, Select};
 
 /// Fractional-second digits used for every temporal column type.
@@ -108,6 +110,24 @@ where
 
     fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
         lower_join(&self)
+    }
+}
+
+impl<E, K, A> IntoAfterBurnerIr for GroupedSelect<E, K, A>
+where
+    E: Entity,
+    K: ColumnList<E>,
+    A: crate::aggregate::AggregateList<E>,
+{
+    type Error = LoweringError;
+
+    fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
+        lower_grouped::<E>(
+            &self.select,
+            &K::indexes(),
+            &self.aggregates,
+            self.order_by_keys,
+        )
     }
 }
 
@@ -370,6 +390,143 @@ where
         editor.append_operation(
             root,
             OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![rows.relation]),
+        )?;
+    }
+    Ok(module)
+}
+
+/// Lowers one grouped aggregate into a complete, unverified IR module.
+///
+/// The row pipeline (scan and filter — SQL's `WHERE`) feeds an `Aggregate`
+/// whose region yields the group keys first, straight from the row's block
+/// arguments as the grouping contract requires, followed by one aggregate
+/// call per spec. Key ordering, when requested, sorts the aggregate output
+/// by its leading key fields.
+fn lower_grouped<E>(
+    select: &Select<E>,
+    keys: &[usize],
+    aggregates: &[AggregateSpec],
+    order_by_keys: bool,
+) -> Result<Module, LoweringError>
+where
+    E: Entity,
+{
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let rows = lower_pipeline::<E>(
+            &mut editor,
+            root,
+            &RowPipeline {
+                filter: select.filter.as_deref(),
+                distinct: select.distinct,
+                order: &[],
+                has_offset: false,
+                has_fetch: false,
+                predicate_binds: select.binds.len(),
+            },
+        )?;
+
+        // Output schema: the key columns keep their names and types, each
+        // aggregate takes a positional name and its own promoted type.
+        let mut fields = Vec::with_capacity(keys.len() + aggregates.len());
+        for index in keys {
+            let column = &E::COLUMNS[*index];
+            fields.push(Field::new(
+                column.name(),
+                Type::Scalar(column_scalar_type(column)),
+            ));
+        }
+        let mut aggregate_types = Vec::with_capacity(aggregates.len());
+        for (position, spec) in aggregates.iter().enumerate() {
+            let ty = ScalarType::new(sql_type(spec.column_type), spec.nullable);
+            aggregate_types.push(ty.clone());
+            fields.push(Field::new(
+                format!("{}_{position}", spec.function.sql_name()),
+                Type::Scalar(ty),
+            ));
+        }
+        let output_types: Vec<Type> = fields.iter().map(|field| field.ty().clone()).collect();
+        let output_schema = editor.intern_schema(Schema::new(fields));
+        let output_relation = Type::relation(output_schema);
+
+        let group_count = u32::try_from(keys.len()).expect("column counts fit in 32 bits");
+        let aggregate = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Aggregate {
+                group_keys: group_count,
+            })
+            .with_operands(vec![rows.relation])
+            .with_result(output_relation.clone()),
+        )?;
+        let region = editor.add_region(aggregate)?;
+        let block = editor.append_block(region, rows.field_types)?;
+        // The region yields the grouping expressions first — the exact
+        // block arguments, as grouping identity requires — and then the
+        // full output row, whose leading key fields repeat those same
+        // arguments.
+        let mut yielded = Vec::with_capacity(2 * keys.len() + aggregates.len());
+        for index in keys {
+            yielded.push(editor.block_argument(block, *index)?);
+        }
+        for index in keys {
+            yielded.push(editor.block_argument(block, *index)?);
+        }
+        for (spec, ty) in aggregates.iter().zip(&aggregate_types) {
+            let mut operands = Vec::new();
+            if let Some(column) = spec.column {
+                operands.push(editor.block_argument(block, column)?);
+            }
+            let call = editor.append_operation(
+                block,
+                OperationSpec::new(ScalarOp::AggregateCall {
+                    function: FunctionRef::new(spec.function.sql_name()),
+                    distinct: false,
+                    volatility: Volatility::Immutable,
+                    effects: EffectSet::PURE,
+                })
+                .with_operands(operands)
+                .with_result(Type::Scalar(ty.clone())),
+            )?;
+            yielded.push(editor.result(call, 0)?);
+        }
+        editor.append_operation(
+            block,
+            OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
+        )?;
+        let mut relation = editor.result(aggregate, 0)?;
+
+        if order_by_keys {
+            let sort_keys = vec![
+                SortKey::new(
+                    afterburner::ir::SortDirection::Ascending,
+                    afterburner::ir::NullOrder::Last,
+                );
+                keys.len()
+            ];
+            let sort = editor.append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Sort { keys: sort_keys })
+                    .with_operands(vec![relation])
+                    .with_result(output_relation.clone()),
+            )?;
+            let region = editor.add_region(sort)?;
+            let block = editor.append_block(region, output_types.clone())?;
+            let mut yielded = Vec::with_capacity(keys.len());
+            for position in 0..keys.len() {
+                yielded.push(editor.block_argument(block, position)?);
+            }
+            editor.append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
+            )?;
+            relation = editor.result(sort, 0)?;
+        }
+
+        editor.append_operation(
+            root,
+            OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![relation]),
         )?;
     }
     Ok(module)

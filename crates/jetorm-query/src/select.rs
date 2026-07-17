@@ -48,6 +48,10 @@ pub struct QueryShape {
     /// type. Joins over different edges — or a join and its plain select —
     /// must never share a cached statement.
     join: Option<TypeId>,
+    /// Grouping structure: key positions, aggregate specs, and key
+    /// ordering. A grouped query never shares a statement with anything
+    /// differing in any of the three.
+    group: Option<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>,
 }
 
 impl PartialEq for QueryShape {
@@ -65,6 +69,7 @@ impl PartialEq for QueryShape {
             && self.projection == other.projection
             && self.count == other.count
             && self.join == other.join
+            && self.group == other.group
             && match (&self.filter, &other.filter) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
@@ -244,6 +249,7 @@ where
         (has_offset, has_fetch, self.distinct, false).hash(&mut hasher);
         self.projection.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
+        false.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -256,6 +262,7 @@ where
             projection: self.projection.clone(),
             count: false,
             join: None,
+            group: None,
         }
     }
 
@@ -339,6 +346,7 @@ where
         (has_offset, has_fetch, self.distinct, true).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
+        false.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -351,6 +359,7 @@ where
             projection: None,
             count: true,
             join: None,
+            group: None,
         }
     }
 }
@@ -393,6 +402,7 @@ impl QueryShape {
         (has_offset, has_fetch, select.distinct, false).hash(&mut hasher);
         select.projection.hash(&mut hasher);
         Some(join).hash(&mut hasher);
+        false.hash(&mut hasher);
 
         Self {
             hash: hasher.finish(),
@@ -405,6 +415,44 @@ impl QueryShape {
             projection: select.projection.clone(),
             count: false,
             join: Some(join),
+            group: None,
+        }
+    }
+
+    /// Builds the shape of a grouped aggregate over a base select.
+    pub(crate) fn for_grouped<E>(
+        select: &Select<E>,
+        keys: Vec<usize>,
+        aggregates: Vec<crate::aggregate::AggregateSpec>,
+        order_by_keys: bool,
+    ) -> Self
+    where
+        E: Entity,
+    {
+        let entity = TypeId::of::<E>();
+
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        select.filter.hash(&mut hasher);
+        Vec::<SortKeySpec>::new().hash(&mut hasher);
+        (false, false, select.distinct, false).hash(&mut hasher);
+        None::<Vec<usize>>.hash(&mut hasher);
+        None::<TypeId>.hash(&mut hasher);
+        true.hash(&mut hasher);
+        (&keys, &aggregates, order_by_keys).hash(&mut hasher);
+
+        Self {
+            hash: hasher.finish(),
+            entity,
+            filter: select.filter.clone(),
+            order: Vec::new(),
+            has_offset: false,
+            has_fetch: false,
+            distinct: select.distinct,
+            projection: None,
+            count: false,
+            join: None,
+            group: Some((keys, aggregates, order_by_keys)),
         }
     }
 }

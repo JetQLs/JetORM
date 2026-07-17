@@ -65,6 +65,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod aggregate;
 mod cursor;
 mod expr;
 mod join;
@@ -72,6 +73,10 @@ mod lowering;
 mod projection;
 mod select;
 
+pub use aggregate::{
+    Aggregate, AggregateFunction, AggregateList, AggregateSpec, Averageable, Comparable, GroupBy,
+    GroupedSelect, Summable, avg, count_rows, max, min, sum,
+};
 pub use cursor::{Cursor, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use join::JoinSelect;

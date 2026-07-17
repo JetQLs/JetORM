@@ -17,4 +17,6 @@ workspace = true
 
 [dependencies]
 afterburner.workspace = true
+chrono.workspace = true
 jetorm-entity.workspace = true
+rust_decimal.workspace = true

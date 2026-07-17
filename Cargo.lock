@@ -1783,7 +1783,9 @@ name = "jetorm-query"
 version = "0.1.0"
 dependencies = [
  "afterburner",
+ "chrono",
  "jetorm-entity",
+ "rust_decimal",
 ]
 
 [[package]]

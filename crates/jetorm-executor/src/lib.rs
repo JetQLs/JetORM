@@ -72,7 +72,7 @@ pub use paginate::{CursorExecute, PaginateExecute, Paginator};
 pub use plan::PlanCache;
 pub use relations::{load_many, load_one};
 pub use row::JetRow;
-pub use select::{ProjectedExecute, SelectExecute};
+pub use select::{GroupedExecute, ProjectedExecute, SelectExecute};
 
 /// The `sqlx` version JetORM is built against.
 ///

@@ -28,8 +28,9 @@ pub enum MigrationError {
     Replay {
         /// Migration whose replay failed.
         version: String,
-        /// Underlying schema-model failure.
-        source: ApplyError,
+        /// Underlying schema-model failure, boxed to keep the error type
+        /// small on the `Result` hot path.
+        source: Box<ApplyError>,
     },
     /// The database has a migration applied that the migration set does not
     /// contain, so history cannot be interpreted.
@@ -92,7 +93,7 @@ impl fmt::Display for MigrationError {
 impl Error for MigrationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Replay { source, .. } => Some(source),
+            Self::Replay { source, .. } => Some(source.as_ref()),
             Self::Render { source, .. } => Some(source),
             Self::Database(error) => Some(error),
             Self::DuplicateVersion { .. }

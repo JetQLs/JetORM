@@ -258,7 +258,7 @@ impl MigrationSet {
                 schema.apply_all(step.state_changes()).map_err(|source| {
                     MigrationError::Replay {
                         version: migration.version.clone(),
-                        source,
+                        source: Box::new(source),
                     }
                 })?;
             }
@@ -292,7 +292,7 @@ impl MigrationSet {
                 schema.apply_all(step.state_changes()).map_err(|source| {
                     MigrationError::Replay {
                         version: migration.version.clone(),
-                        source,
+                        source: Box::new(source),
                     }
                 })?;
             }

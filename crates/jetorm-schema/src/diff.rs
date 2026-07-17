@@ -4,7 +4,7 @@ use std::fmt;
 use jetorm_entity::ColumnType;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ColumnDef, SchemaSet, TableDef, TableName};
+use crate::model::{ColumnDef, ForeignKeyDef, SchemaSet, TableDef, TableName};
 
 /// One schema change turning a current state toward a target state.
 ///
@@ -95,6 +95,20 @@ pub enum SchemaChange {
         /// Key required by the target state.
         to: Vec<String>,
     },
+    /// Adds one foreign-key constraint to an existing table.
+    AddForeignKey {
+        /// Table owning the constraint.
+        table: TableName,
+        /// Complete definition of the constraint.
+        foreign_key: ForeignKeyDef,
+    },
+    /// Drops one foreign-key constraint by name.
+    DropForeignKey {
+        /// Table owning the constraint.
+        table: TableName,
+        /// Constraint name.
+        name: String,
+    },
 }
 
 impl SchemaChange {
@@ -118,7 +132,13 @@ impl SchemaChange {
             Self::SetNullable { nullable, .. } => !nullable,
             Self::SetUnique { unique, .. } => *unique,
             Self::SetAutoIncrement { auto_increment, .. } => *auto_increment,
-            Self::CreateTable(_) | Self::RenameTable { .. } | Self::RenameColumn { .. } => false,
+            // Existing rows can violate a new constraint; dropping one
+            // cannot fail and loses no data.
+            Self::AddForeignKey { .. } => true,
+            Self::CreateTable(_)
+            | Self::RenameTable { .. }
+            | Self::RenameColumn { .. }
+            | Self::DropForeignKey { .. } => false,
         }
     }
 
@@ -135,7 +155,9 @@ impl SchemaChange {
             | Self::SetNullable { table, .. }
             | Self::SetUnique { table, .. }
             | Self::SetAutoIncrement { table, .. }
-            | Self::SetPrimaryKey { table, .. } => table,
+            | Self::SetPrimaryKey { table, .. }
+            | Self::AddForeignKey { table, .. }
+            | Self::DropForeignKey { table, .. } => table,
         }
     }
 }
@@ -203,6 +225,17 @@ impl fmt::Display for SchemaChange {
                     "set primary key of {table} to ({})",
                     to.join(", ")
                 )
+            }
+            Self::AddForeignKey { table, foreign_key } => write!(
+                formatter,
+                "add foreign key {} on {table}.{} -> {}.{}",
+                foreign_key.name(),
+                foreign_key.column(),
+                foreign_key.target_table(),
+                foreign_key.target_column()
+            ),
+            Self::DropForeignKey { table, name } => {
+                write!(formatter, "drop foreign key {name} on {table}")
             }
         }
     }
@@ -342,9 +375,18 @@ impl SchemaDiff {
 /// The result is deterministic for any pair of inputs, and applying it to
 /// `current` with [`SchemaSet::apply`] reproduces `target` exactly. Renames
 /// are surfaced as candidates, never guessed.
+///
+/// Foreign keys bracket everything else: every `DropForeignKey` comes
+/// first — a reference must be gone before its column or table can go —
+/// and every `AddForeignKey` comes last, after all referenced tables and
+/// columns exist. `CREATE TABLE` therefore never carries constraints
+/// inline, so mutually referencing tables and self-references order
+/// correctly no matter their names.
 #[must_use]
 pub fn diff(current: &SchemaSet, target: &SchemaSet) -> SchemaDiff {
+    let mut foreign_key_drops = Vec::new();
     let mut changes = Vec::new();
+    let mut foreign_key_adds = Vec::new();
     let mut rename_candidates = Vec::new();
 
     let names: BTreeSet<&TableName> = current
@@ -355,14 +397,38 @@ pub fn diff(current: &SchemaSet, target: &SchemaSet) -> SchemaDiff {
 
     for name in &names {
         match (current.table(name), target.table(name)) {
-            (Some(_), None) => changes.push(SchemaChange::DropTable((*name).clone())),
-            (None, Some(created)) => changes.push(SchemaChange::CreateTable(created.clone())),
+            (Some(dropped), None) => {
+                // Dropping the constraints first makes `DROP TABLE` order
+                // irrelevant even among mutually referencing tables.
+                for foreign_key in dropped.foreign_keys() {
+                    foreign_key_drops.push(SchemaChange::DropForeignKey {
+                        table: (*name).clone(),
+                        name: foreign_key.name().to_owned(),
+                    });
+                }
+                changes.push(SchemaChange::DropTable((*name).clone()));
+            }
+            (None, Some(created)) => {
+                changes.push(SchemaChange::CreateTable(created.without_foreign_keys()));
+                for foreign_key in created.foreign_keys() {
+                    foreign_key_adds.push(SchemaChange::AddForeignKey {
+                        table: (*name).clone(),
+                        foreign_key: foreign_key.clone(),
+                    });
+                }
+            }
             (Some(from), Some(to)) => {
+                diff_foreign_keys(from, to, &mut foreign_key_drops, &mut foreign_key_adds);
                 diff_table(from, to, &mut changes, &mut rename_candidates);
             }
             (None, None) => unreachable!("names came from one of the two sets"),
         }
     }
+
+    let mut ordered = foreign_key_drops;
+    ordered.append(&mut changes);
+    ordered.append(&mut foreign_key_adds);
+    let changes = ordered;
 
     for dropped in current.tables() {
         if target.table(dropped.name()).is_some() {
@@ -388,8 +454,47 @@ pub fn diff(current: &SchemaSet, target: &SchemaSet) -> SchemaDiff {
 }
 
 /// Reports whether two tables are identical modulo their name.
+///
+/// Foreign keys compare by shape rather than by constraint name: names
+/// regenerated from entity metadata embed the new table name, which must
+/// not disqualify an otherwise exact rename.
 fn same_table_shape(left: &TableDef, right: &TableDef) -> bool {
-    left.primary_key() == right.primary_key() && left.columns().eq(right.columns())
+    left.primary_key() == right.primary_key()
+        && left.columns().eq(right.columns())
+        && left.foreign_keys().count() == right.foreign_keys().count()
+        && left
+            .foreign_keys()
+            .zip(right.foreign_keys())
+            .all(|(a, b)| a.same_shape(b))
+}
+
+/// Emits the drop-then-add changes reconciling one table's foreign keys.
+///
+/// A constraint whose definition changed drops and re-adds under the same
+/// name: `ALTER CONSTRAINT` cannot change columns or targets.
+fn diff_foreign_keys(
+    current: &TableDef,
+    target: &TableDef,
+    drops: &mut Vec<SchemaChange>,
+    adds: &mut Vec<SchemaChange>,
+) {
+    let table = current.name().clone();
+    for existing in current.foreign_keys() {
+        if target.foreign_key(existing.name()) != Some(existing) {
+            drops.push(SchemaChange::DropForeignKey {
+                table: table.clone(),
+                name: existing.name().to_owned(),
+            });
+        }
+    }
+    for desired in target.foreign_keys() {
+        if current.foreign_key(desired.name()) != Some(desired) {
+            adds.push(SchemaChange::AddForeignKey {
+                table: table.clone(),
+                foreign_key: desired.clone(),
+            });
+        }
+    }
 }
 
 fn diff_table(

@@ -1,5 +1,6 @@
 use crate::error::DecodeError;
 use crate::meta::{ColumnMeta, TableMeta};
+use crate::relation::ForeignKeyRef;
 use crate::value::{SqlValue, Value};
 
 /// Static description of one database table.
@@ -20,6 +21,13 @@ pub trait Entity: Copy + 'static {
 
     /// Positions of primary-key columns within [`Self::COLUMNS`].
     const PRIMARY_KEY: &'static [usize];
+
+    /// Foreign keys owned by this entity's table.
+    ///
+    /// One entry per `#[jet(references = ...)]` column; schema diffing turns
+    /// these into `FOREIGN KEY` constraints. Defaulted so hand-written
+    /// entities without constraints need not mention it.
+    const FOREIGN_KEYS: &'static [ForeignKeyRef] = &[];
 }
 
 /// Positional conversion between a row struct and runtime values.

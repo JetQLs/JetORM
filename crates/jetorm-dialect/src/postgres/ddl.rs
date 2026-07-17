@@ -12,8 +12,8 @@
 //!   `{table}_{column}_key`), so constraints created inline by
 //!   `CREATE TABLE` can later be dropped by the names PostgreSQL gave them.
 
-use jetorm_entity::ColumnType;
-use jetorm_schema::{ColumnDef, SchemaChange, TableDef, TableName};
+use jetorm_entity::{ColumnType, ReferentialAction};
+use jetorm_schema::{ColumnDef, ForeignKeyDef, SchemaChange, TableDef, TableName};
 
 use crate::error::RenderError;
 use crate::postgres::quote_identifier;
@@ -123,6 +123,63 @@ pub fn render_change(change: &SchemaChange) -> Result<Vec<String>, RenderError> 
             }
             Ok(statements)
         }
+        SchemaChange::AddForeignKey { table, foreign_key } => {
+            Ok(vec![add_foreign_key_sql(table, foreign_key)?])
+        }
+        SchemaChange::DropForeignKey { table, name } => Ok(vec![format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            table_sql(table)?,
+            quote_identifier(name)?
+        )]),
+    }
+}
+
+fn add_foreign_key_sql(
+    table: &TableName,
+    foreign_key: &ForeignKeyDef,
+) -> Result<String, RenderError> {
+    Ok(format!(
+        "ALTER TABLE {} ADD {}",
+        table_sql(table)?,
+        foreign_key_clause(foreign_key)?
+    ))
+}
+
+fn foreign_key_clause(foreign_key: &ForeignKeyDef) -> Result<String, RenderError> {
+    let mut sql = format!(
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        quote_identifier(foreign_key.name())?,
+        quote_identifier(foreign_key.column())?,
+        table_sql(foreign_key.target_table())?,
+        quote_identifier(foreign_key.target_column())?
+    );
+    if let Some(action) = referential_action_sql(foreign_key.delete_action())? {
+        sql.push_str(" ON DELETE ");
+        sql.push_str(action);
+    }
+    if let Some(action) = referential_action_sql(foreign_key.update_action())? {
+        sql.push_str(" ON UPDATE ");
+        sql.push_str(action);
+    }
+    Ok(sql)
+}
+
+/// Returns the action clause, or `None` for `NO ACTION` — the default the
+/// database assumes when the clause is absent, kept absent so rendered DDL
+/// matches what PostgreSQL itself prints.
+fn referential_action_sql(action: ReferentialAction) -> Result<Option<&'static str>, RenderError> {
+    match action {
+        ReferentialAction::NoAction => Ok(None),
+        ReferentialAction::Restrict => Ok(Some("RESTRICT")),
+        ReferentialAction::Cascade => Ok(Some("CASCADE")),
+        ReferentialAction::SetNull => Ok(Some("SET NULL")),
+        ReferentialAction::SetDefault => Ok(Some("SET DEFAULT")),
+        // `ReferentialAction` is non-exhaustive: fail loudly when a variant
+        // this dialect has not learned appears, instead of rendering a
+        // constraint with silently wrong semantics.
+        _ => Err(RenderError::unsupported(
+            "referential action not supported by the PostgreSQL renderer",
+        )),
     }
 }
 
@@ -149,6 +206,12 @@ fn create_table_sql(table: &TableDef) -> Result<String, RenderError> {
             "PRIMARY KEY ({})",
             column_list(table.primary_key())?
         ));
+    }
+    // Diff-produced creates carry no constraints (they land as separate
+    // `AddForeignKey` changes once every referenced table exists), but a
+    // hand-built definition renders faithfully.
+    for foreign_key in table.foreign_keys() {
+        items.push(foreign_key_clause(foreign_key)?);
     }
     Ok(format!(
         "CREATE TABLE {} ({})",

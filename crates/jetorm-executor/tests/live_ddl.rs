@@ -6,10 +6,10 @@
 //! `cargo xtask test-live` (needs a Docker daemon).
 
 use jetorm_dialect::postgres::ddl::render_change;
-use jetorm_entity::ColumnType;
+use jetorm_entity::{ColumnType, ReferentialAction};
 use jetorm_executor::Database;
 use jetorm_schema::SchemaSet;
-use jetorm_schema::{ColumnDef, SchemaChange, TableDef, TableName, diff};
+use jetorm_schema::{ColumnDef, ForeignKeyDef, SchemaChange, TableDef, TableName, diff};
 use sqlx::Row;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -162,6 +162,71 @@ async fn entity_diff_bootstraps_a_queryable_database() {
         .expect("bootstrapped table is queryable")
         .get(0);
     assert_eq!(count, 1);
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn foreign_key_ddl_enforces_references_on_live_postgres() {
+    let (_container, db) = fresh_database().await;
+
+    // Diff from empty: creates first, constraints last — the order must be
+    // accepted verbatim by the server.
+    let posts = TableDef::new(TableName::new("ddl_posts"))
+        .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+        .with_column(ColumnDef::new("author_id", ColumnType::Int64))
+        .with_primary_key(vec!["id".to_owned()])
+        .with_foreign_key(
+            ForeignKeyDef::new(
+                "ddl_posts_author_id_fkey",
+                "author_id",
+                TableName::new("ddl_users"),
+                "id",
+            )
+            .on_delete(ReferentialAction::Cascade),
+        );
+    let mut target = SchemaSet::new();
+    target.insert(users_table());
+    target.insert(posts);
+    let changes = diff(&SchemaSet::new(), &target);
+    for change in changes.changes() {
+        execute_change(&db, change).await;
+    }
+
+    sqlx::query("INSERT INTO ddl_users (name) VALUES ('alice')")
+        .execute(db.pool())
+        .await
+        .expect("parent row inserts");
+    sqlx::query("INSERT INTO ddl_posts (author_id) VALUES (1)")
+        .execute(db.pool())
+        .await
+        .expect("valid reference inserts");
+
+    // The constraint is live: a dangling reference is rejected...
+    let violation = sqlx::query("INSERT INTO ddl_posts (author_id) VALUES (999)")
+        .execute(db.pool())
+        .await;
+    assert!(violation.is_err(), "dangling reference must be rejected");
+
+    // ...and ON DELETE CASCADE propagates.
+    sqlx::query("DELETE FROM ddl_users WHERE id = 1")
+        .execute(db.pool())
+        .await
+        .expect("parent delete cascades");
+    let remaining: i64 = sqlx::query("SELECT count(*) FROM ddl_posts")
+        .fetch_one(db.pool())
+        .await
+        .expect("count runs")
+        .get(0);
+    assert_eq!(remaining, 0, "cascade removed the referencing row");
+
+    // Tearing everything down goes constraint-first, so drop order of
+    // mutually dependent tables never matters.
+    let teardown = diff(&target, &SchemaSet::new());
+    for change in teardown.changes() {
+        execute_change(&db, change).await;
+    }
 
     db.close().await;
 }

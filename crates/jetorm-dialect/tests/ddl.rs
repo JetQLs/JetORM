@@ -1,6 +1,6 @@
 use jetorm_dialect::postgres::ddl::{render_change, render_changes};
-use jetorm_entity::ColumnType;
-use jetorm_schema::{ColumnDef, SchemaChange, TableDef, TableName};
+use jetorm_entity::{ColumnType, ReferentialAction};
+use jetorm_schema::{ColumnDef, ForeignKeyDef, SchemaChange, TableDef, TableName};
 
 fn users_table() -> TableDef {
     TableDef::new(TableName::qualified("public", "users"))
@@ -198,5 +198,81 @@ fn change_sets_render_in_order() {
             "CREATE TABLE \"tags\" (\"id\" bigint NOT NULL, PRIMARY KEY (\"id\"))",
             "DROP TABLE \"legacy\"",
         ]
+    );
+}
+
+#[test]
+fn foreign_key_changes_render_constraint_statements() {
+    let posts = TableName::qualified("public", "posts");
+    let add = SchemaChange::AddForeignKey {
+        table: posts.clone(),
+        foreign_key: ForeignKeyDef::new(
+            "posts_author_id_fkey",
+            "author_id",
+            TableName::qualified("public", "users"),
+            "id",
+        )
+        .on_delete(ReferentialAction::Cascade)
+        .on_update(ReferentialAction::Restrict),
+    };
+    assert_eq!(
+        render_change(&add).expect("add renders"),
+        ["ALTER TABLE \"public\".\"posts\" \
+          ADD CONSTRAINT \"posts_author_id_fkey\" \
+          FOREIGN KEY (\"author_id\") REFERENCES \"public\".\"users\" (\"id\") \
+          ON DELETE CASCADE ON UPDATE RESTRICT"]
+    );
+
+    // NO ACTION is the database default and stays unspelled, matching what
+    // PostgreSQL itself prints for such a constraint.
+    let plain = SchemaChange::AddForeignKey {
+        table: posts.clone(),
+        foreign_key: ForeignKeyDef::new(
+            "posts_editor_id_fkey",
+            "editor_id",
+            TableName::qualified("public", "users"),
+            "id",
+        ),
+    };
+    assert_eq!(
+        render_change(&plain).expect("add renders"),
+        ["ALTER TABLE \"public\".\"posts\" \
+          ADD CONSTRAINT \"posts_editor_id_fkey\" \
+          FOREIGN KEY (\"editor_id\") REFERENCES \"public\".\"users\" (\"id\")"]
+    );
+
+    let drop = SchemaChange::DropForeignKey {
+        table: posts,
+        name: "posts_author_id_fkey".to_owned(),
+    };
+    assert_eq!(
+        render_change(&drop).expect("drop renders"),
+        ["ALTER TABLE \"public\".\"posts\" DROP CONSTRAINT \"posts_author_id_fkey\""]
+    );
+}
+
+#[test]
+fn hand_built_create_table_renders_inline_foreign_keys() {
+    let table = TableDef::new(TableName::new("posts"))
+        .with_column(ColumnDef::new("id", ColumnType::Int64))
+        .with_column(ColumnDef::new("author_id", ColumnType::Int64))
+        .with_primary_key(vec!["id".to_owned()])
+        .with_foreign_key(
+            ForeignKeyDef::new(
+                "posts_author_id_fkey",
+                "author_id",
+                TableName::new("users"),
+                "id",
+            )
+            .on_delete(ReferentialAction::SetNull),
+        );
+    assert_eq!(
+        render_change(&SchemaChange::CreateTable(table)).expect("create renders"),
+        ["CREATE TABLE \"posts\" (\
+             \"author_id\" bigint NOT NULL, \
+             \"id\" bigint NOT NULL, \
+             PRIMARY KEY (\"id\"), \
+             CONSTRAINT \"posts_author_id_fkey\" FOREIGN KEY (\"author_id\") \
+             REFERENCES \"users\" (\"id\") ON DELETE SET NULL)"]
     );
 }

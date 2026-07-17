@@ -78,6 +78,25 @@ fn owning_edges_carry_their_constraint_and_inverses_do_not() {
 }
 
 #[test]
+fn entities_enumerate_their_foreign_keys_as_values() {
+    // The value-level mirror of the relation markers: schema tooling walks
+    // this without naming marker types.
+    let keys = <PostEntity as Entity>::FOREIGN_KEYS;
+    assert_eq!(keys.len(), 2);
+
+    assert_eq!(keys[0].column(), 2);
+    assert_eq!(keys[0].target_table().name(), "users");
+    assert_eq!(keys[0].target_column(), "id");
+    assert_eq!(keys[0].actions().on_delete(), ReferentialAction::Cascade);
+    assert_eq!(keys[0].actions().on_update(), ReferentialAction::NoAction);
+
+    assert_eq!(keys[1].column(), 3);
+    assert_eq!(keys[1].actions().on_delete(), ReferentialAction::NoAction);
+
+    assert!(<UserEntity as Entity>::FOREIGN_KEYS.is_empty());
+}
+
+#[test]
 fn models_expose_column_values_by_position() {
     let post = Post {
         id: 5,

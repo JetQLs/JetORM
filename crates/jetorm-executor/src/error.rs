@@ -24,6 +24,15 @@ pub enum ExecuteError {
         /// Bind-table position the statement expected.
         position: u32,
     },
+    /// A bind value could not be handed to the driver — for example an
+    /// array whose element disagrees with its declared kind. This indicates
+    /// a bug in query construction.
+    MalformedBind {
+        /// Bind-table position of the rejected value.
+        position: u32,
+        /// Why the driver binding failed.
+        detail: String,
+    },
     /// One fetched row could not be decoded into the entity's model.
     Decode {
         /// Zero-based index of the offending row in the result set.
@@ -94,6 +103,9 @@ impl fmt::Display for ExecuteError {
                 formatter,
                 "statement references bind position {position} that the query never captured"
             ),
+            Self::MalformedBind { position, detail } => {
+                write!(formatter, "bind position {position} is malformed: {detail}")
+            }
             Self::Decode { row, source } => {
                 write!(formatter, "row {row} could not be decoded: {source}")
             }
@@ -107,7 +119,7 @@ impl Error for ExecuteError {
             Self::Build(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::MissingBind { .. } => None,
+            Self::MissingBind { .. } | Self::MalformedBind { .. } => None,
             Self::Decode { source, .. } => Some(source),
         }
     }

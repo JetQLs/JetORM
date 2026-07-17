@@ -61,6 +61,7 @@ pub(crate) fn type_name(kind: &SqlType) -> Result<String, RenderError> {
         SqlType::Uuid => Ok("uuid".to_owned()),
         SqlType::Json => Ok("jsonb".to_owned()),
         SqlType::Custom(name) => custom_type_name(name),
+        SqlType::Array { element } => Ok(format!("{}[]", type_name(element)?)),
     }
 }
 

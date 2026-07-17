@@ -509,6 +509,14 @@ pub enum BinaryOperator {
     CaseInsensitiveLike,
     /// Null-safe distinctness comparison.
     IsDistinctFrom,
+    /// Membership of a scalar in an array value.
+    ///
+    /// The left operand is a scalar, the right operand is an array whose
+    /// element kind equals the left operand's kind, and the result is a
+    /// Boolean. Lowering a key list through one array-typed parameter keeps
+    /// the operation's structure — and therefore fingerprints and plan-cache
+    /// identities — independent of the number of keys.
+    InArray,
 }
 
 /// Scalar SSA dialect used inside relational expression regions.

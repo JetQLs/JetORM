@@ -203,6 +203,11 @@ impl Verifier<'_> {
                     VerificationLocation::Schema(schema),
                     "custom scalar type name must not be empty",
                 ),
+                SqlType::Array { element } => {
+                    if let Some(message) = scalar_type_error(element) {
+                        self.error(VerificationLocation::Schema(schema), message);
+                    }
+                }
                 SqlType::Boolean
                 | SqlType::Integer { .. }
                 | SqlType::Float { .. }
@@ -969,7 +974,26 @@ impl Verifier<'_> {
                         "binary operation requires scalar operands",
                     );
                 }
-                if left != right {
+                if *operator == BinaryOperator::InArray {
+                    // Membership pairs a scalar with an array of its kind
+                    // rather than two operands of one type.
+                    let element_matches = match (
+                        left.as_ref().and_then(Type::as_scalar),
+                        right.as_ref().and_then(Type::as_scalar),
+                    ) {
+                        (Some(scalar), Some(array)) => match array.kind() {
+                            SqlType::Array { element } => **element == *scalar.kind(),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if !element_matches {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            "in-array requires an array operand of the scalar operand's kind",
+                        );
+                    }
+                } else if left != right {
                     self.error(
                         VerificationLocation::Operation(operation_id),
                         "binary operand types must match after explicit coercion",
@@ -1820,6 +1844,7 @@ fn binary_returns_boolean(operator: BinaryOperator) -> bool {
             | BinaryOperator::Like
             | BinaryOperator::CaseInsensitiveLike
             | BinaryOperator::IsDistinctFrom
+            | BinaryOperator::InArray
     )
 }
 
@@ -1870,6 +1895,7 @@ fn scalar_type_error(ty: &SqlType) -> Option<String> {
         SqlType::Custom(name) if name.is_empty() => {
             Some("custom scalar type name must not be empty".into())
         }
+        SqlType::Array { element } => scalar_type_error(element),
         SqlType::Boolean
         | SqlType::Integer { .. }
         | SqlType::Float { .. }

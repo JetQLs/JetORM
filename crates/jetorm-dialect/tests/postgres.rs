@@ -1370,3 +1370,23 @@ fn sort_after_projection_wraps_a_derived_table() {
          ORDER BY \"t1\".\"next_id\" ASC"
     );
 }
+
+#[test]
+fn membership_renders_as_any_over_one_array_parameter() {
+    let statement = render(UserEntity::find().filter(Id.is_in([1_i64, 3, 5])));
+    assert_eq!(
+        statement.sql(),
+        "SELECT \"t0\".\"id\", \"t0\".\"name\", \"t0\".\"email\" \
+         FROM \"public\".\"users\" AS \"t0\" \
+         WHERE (\"t0\".\"id\" = ANY($1::bigint[]))"
+    );
+    assert_eq!(statement.bind_order(), [0]);
+
+    // Text elements carry their own array cast.
+    let statement = render(UserEntity::find().filter(Name.is_in(["a", "b"])));
+    assert!(
+        statement.sql().contains("= ANY($1::text[])"),
+        "unexpected SQL: {}",
+        statement.sql()
+    );
+}

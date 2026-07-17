@@ -311,7 +311,7 @@ where
 
     /// Converts this query into a scalar existence test over the same rows.
     ///
-    /// Ordering, projection, and duplicate elimination cannot change whether
+    /// Ordering and projection cannot change whether
     /// at least one row exists, so the derived statement omits them.
     #[must_use]
     pub fn exists(self) -> Exists<E> {
@@ -539,7 +539,7 @@ impl QueryShape {
         entity.hash(&mut hasher);
         select.filter.hash(&mut hasher);
         Vec::<SortKeySpec>::new().hash(&mut hasher);
-        (has_offset, has_fetch, false).hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
         kind.hash(&mut hasher);
         None::<TypeId>.hash(&mut hasher);
@@ -553,7 +553,7 @@ impl QueryShape {
             order: Vec::new(),
             has_offset,
             has_fetch,
-            distinct: false,
+            distinct: select.distinct,
             projection: None,
             kind,
             join: None,

@@ -312,8 +312,27 @@ pub async fn run(
                 );
                 ui.mode = Mode::Notice(notice);
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Keep the interaction mode — a rename review in flight
+                // must not lose its remaining queue — while the panes
+                // track the snapshot the effect may have rewritten.
+                ui.rows = snapshot.rows.clone();
+                ui.drift = snapshot.drift.clone();
+                ui.candidates = snapshot.candidates.clone();
+                ui.selected = ui.selected.min(ui.rows.len().saturating_sub(1));
+            }
             Err(error) => {
+                // A failed apply may still have applied a prefix of the
+                // plan; reload so the rows tell the truth alongside the
+                // error.
+                if let Ok(reloaded) = load(database, &dir, schema.as_ref()).await {
+                    snapshot = reloaded;
+                    ui = Ui::new(
+                        snapshot.rows.clone(),
+                        snapshot.drift.clone(),
+                        snapshot.candidates.clone(),
+                    );
+                }
                 ui.mode = Mode::Notice(format!("error: {error}"));
             }
         }
@@ -351,14 +370,13 @@ async fn run_effect(
             let Some(live) = snapshot.diff.as_mut() else {
                 return Ok(None);
             };
-            let rewritten = live.confirm_rename(&candidate);
+            // No notice: a notice would rebuild the interface and drop the
+            // remaining review queue. The rewritten drift pane is the
+            // feedback.
+            live.confirm_rename(&candidate);
             snapshot.drift = live.changes().iter().map(ToString::to_string).collect();
             snapshot.candidates = live.rename_candidates().to_vec();
-            Ok(Some(if rewritten {
-                "rename confirmed; the plan now renames instead of dropping".to_owned()
-            } else {
-                "candidate no longer applies".to_owned()
-            }))
+            Ok(None)
         }
     }
 }

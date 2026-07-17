@@ -62,6 +62,23 @@ fn having_filters_groups_by_their_aggregates() {
 }
 
 #[test]
+fn nullable_aggregates_ask_the_null_question_directly() {
+    // eq(None) no longer compiles for nullable aggregates — is_null is
+    // the correct spelling and renders as the SQL null test.
+    let query = OrderEntity::find()
+        .group_by((order::Customer,))
+        .select_agg((avg(order::Rating),))
+        .having(|mean| mean.is_null());
+    let module = query.into_afterburner_ir().expect("null test lowers");
+    let statement = Postgres.render_query(&module).expect("null test renders");
+    assert!(
+        statement.sql().contains("\"__agg_0_avg\" IS NULL"),
+        "the null test is IS NULL, not a never-true equality: {}",
+        statement.sql()
+    );
+}
+
+#[test]
 fn limits_and_duplicate_keys_are_rejected_at_lowering() {
     // A limit's meaning under grouping is ambiguous — source rows or
     // groups — so it must not guess.

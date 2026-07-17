@@ -47,7 +47,9 @@ mod jet {
         pub author_id: i64,
     }
 
-    /// Named projection over `public.users`.
+    /// Named projection over `public.users`. The bench only builds the
+    /// query, so the fields are never read back.
+    #[allow(dead_code)]
     #[derive(Clone, Debug, JetPartial)]
     #[jet(columns = "user")]
     pub struct UserSummary {

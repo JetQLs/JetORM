@@ -52,6 +52,7 @@ struct Id;
 impl Column for Id {
     type Entity = UserEntity;
     type Rust = i64;
+    type Field = i64;
     const INDEX: usize = 0;
     const NULLABLE: bool = false;
 }
@@ -62,6 +63,7 @@ struct Name;
 impl Column for Name {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = String;
     const INDEX: usize = 1;
     const NULLABLE: bool = false;
 }
@@ -72,6 +74,7 @@ struct Email;
 impl Column for Email {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = Option<String>;
     const INDEX: usize = 2;
     const NULLABLE: bool = true;
 }
@@ -1388,5 +1391,36 @@ fn membership_renders_as_any_over_one_array_parameter() {
         statement.sql().contains("= ANY($1::text[])"),
         "unexpected SQL: {}",
         statement.sql()
+    );
+}
+
+#[test]
+fn projection_fuses_flat_with_filter_sort_and_limit() {
+    // Ordering by an unprojected column must stay valid: PostgreSQL
+    // resolves sort keys against the FROM row, so no derived table appears.
+    let statement = render(
+        UserEntity::find()
+            .filter(Id.gt(10))
+            .order_by(Email.desc())
+            .select((Id, Name))
+            .limit(5)
+            .into_select(),
+    );
+    assert_eq!(
+        statement.sql(),
+        "SELECT \"t0\".\"id\" AS \"id\", \"t0\".\"name\" AS \"name\" \
+         FROM \"public\".\"users\" AS \"t0\" \
+         WHERE (\"t0\".\"id\" > $1::bigint) \
+         ORDER BY \"t0\".\"email\" DESC \
+         LIMIT $2::bigint"
+    );
+}
+
+#[test]
+fn single_column_projection_renders_one_output() {
+    let statement = render(UserEntity::find().select((Name,)).into_select());
+    assert_eq!(
+        statement.sql(),
+        "SELECT \"t0\".\"name\" AS \"name\" FROM \"public\".\"users\" AS \"t0\""
     );
 }

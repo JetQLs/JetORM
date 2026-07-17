@@ -40,6 +40,7 @@ pub struct QueryShape {
     has_offset: bool,
     has_fetch: bool,
     distinct: bool,
+    projection: Option<Vec<usize>>,
 }
 
 impl PartialEq for QueryShape {
@@ -54,6 +55,7 @@ impl PartialEq for QueryShape {
             && self.has_offset == other.has_offset
             && self.has_fetch == other.has_fetch
             && self.distinct == other.distinct
+            && self.projection == other.projection
             && match (&self.filter, &other.filter) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
@@ -92,6 +94,9 @@ where
     pub(crate) offset: Option<u64>,
     pub(crate) fetch: Option<u64>,
     pub(crate) distinct: bool,
+    /// Column positions to project, in output order; `None` fetches the
+    /// full row. Set through [`Select::select`].
+    pub(crate) projection: Option<Vec<usize>>,
     entity: PhantomData<fn() -> E>,
 }
 
@@ -109,6 +114,7 @@ where
             offset: None,
             fetch: None,
             distinct: false,
+            projection: None,
             entity: PhantomData,
         }
     }
@@ -197,6 +203,12 @@ where
         }
     }
 
+    /// Returns the projected column positions, when a projection is set.
+    #[must_use]
+    pub fn projection(&self) -> Option<&[usize]> {
+        self.projection.as_deref()
+    }
+
     /// Returns this query's value-independent shape.
     ///
     /// Reading a shape shares the predicate tree instead of cloning it and
@@ -216,6 +228,7 @@ where
         self.filter.hash(&mut hasher);
         self.order.hash(&mut hasher);
         (has_offset, has_fetch, self.distinct).hash(&mut hasher);
+        self.projection.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -225,6 +238,7 @@ where
             has_offset,
             has_fetch,
             distinct: self.distinct,
+            projection: self.projection.clone(),
         }
     }
 }
@@ -252,6 +266,7 @@ where
             .field("offset", &self.offset)
             .field("fetch", &self.fetch)
             .field("distinct", &self.distinct)
+            .field("projection", &self.projection)
             .finish()
     }
 }

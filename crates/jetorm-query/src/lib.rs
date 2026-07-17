@@ -50,6 +50,7 @@
 //! impl Column for Id {
 //!     type Entity = UserEntity;
 //!     type Rust = i64;
+//!     type Field = i64;
 //!     const INDEX: usize = 0;
 //!     const NULLABLE: bool = false;
 //! }
@@ -65,8 +66,10 @@
 
 mod expr;
 mod lowering;
+mod projection;
 mod select;
 
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use lowering::LoweringError;
+pub use projection::{ColumnList, Projected};
 pub use select::{EntityQuery, QueryShape, Select};

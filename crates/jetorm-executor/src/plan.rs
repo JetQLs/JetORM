@@ -144,6 +144,7 @@ mod tests {
     impl Column for Id {
         type Entity = ItemEntity;
         type Rust = i64;
+        type Field = i64;
         const INDEX: usize = 0;
         const NULLABLE: bool = false;
     }

@@ -101,6 +101,7 @@ struct Id;
 impl Column for Id {
     type Entity = UserEntity;
     type Rust = i64;
+    type Field = i64;
     const INDEX: usize = 0;
     const NULLABLE: bool = false;
 }
@@ -111,6 +112,7 @@ struct Name;
 impl Column for Name {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = String;
     const INDEX: usize = 1;
     const NULLABLE: bool = false;
 }
@@ -121,6 +123,7 @@ struct Email;
 impl Column for Email {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = Option<String>;
     const INDEX: usize = 2;
     const NULLABLE: bool = true;
 }
@@ -638,6 +641,53 @@ async fn membership_fetches_exactly_the_listed_keys() {
         .await
         .expect("text membership executes");
     assert_eq!(by_name.len(), 2);
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn projections_fetch_typed_tuples_and_scalars() {
+    use jetorm_executor::ProjectedExecute;
+
+    let (_container, db) = fresh_database().await;
+    create_fixture(&db).await;
+
+    // A tuple projection: the nullable column decodes as an Option.
+    let pairs: Vec<(String, Option<String>)> = UserEntity::find()
+        .order_by(Id.asc())
+        .select((Name, Email))
+        .all(&db)
+        .await
+        .expect("tuple projection executes");
+    assert_eq!(
+        pairs,
+        [
+            ("alice".to_owned(), Some("alice@example.com".to_owned())),
+            ("bob".to_owned(), None),
+            ("carol".to_owned(), Some("carol@example.com".to_owned())),
+        ]
+    );
+
+    // A single-column projection decodes to the bare field type, and
+    // ordering by an unprojected column works.
+    let names: Vec<String> = UserEntity::find()
+        .order_by(Id.desc())
+        .select((Name,))
+        .limit(2)
+        .all(&db)
+        .await
+        .expect("single-column projection executes");
+    assert_eq!(names, ["carol", "bob"]);
+
+    // one() on a projection.
+    let first: Option<i64> = UserEntity::find()
+        .order_by(Id.asc())
+        .select((Id,))
+        .one(&db)
+        .await
+        .expect("projected one() executes");
+    assert_eq!(first, Some(1));
 
     db.close().await;
 }

@@ -33,6 +33,10 @@ pub enum LoweringError {
         /// SQL kind of the right operand.
         right: SqlType,
     },
+    /// The query combined a projection with `DISTINCT`, whose interaction
+    /// (deduplicate the full row, or the projected row?) is not expressible
+    /// yet. Remove one of the two.
+    DistinctOverProjection,
 }
 
 impl fmt::Display for LoweringError {
@@ -43,6 +47,8 @@ impl fmt::Display for LoweringError {
                 formatter,
                 "operand SQL kinds {left:?} and {right:?} are incompatible"
             ),
+            Self::DistinctOverProjection => formatter
+                .write_str("distinct combined with a column projection is not supported yet"),
         }
     }
 }
@@ -51,7 +57,7 @@ impl Error for LoweringError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Internal(error) => Some(error),
-            Self::OperandKindMismatch { .. } => None,
+            Self::OperandKindMismatch { .. } | Self::DistinctOverProjection => None,
         }
     }
 }
@@ -196,6 +202,42 @@ where
                 .with_result(relation_type.clone()),
             )?;
             relation = editor.result(limit, 0)?;
+        }
+
+        if let Some(projection) = &select.projection {
+            if select.distinct {
+                return Err(LoweringError::DistinctOverProjection);
+            }
+            // Projection applies last, so filters, sort keys, and row limits
+            // keep addressing the full row; SQL can always express that
+            // (the SELECT list narrows the row leaving FROM untouched).
+            let output = Schema::new(
+                projection
+                    .iter()
+                    .map(|index| {
+                        let column = &E::COLUMNS[*index];
+                        Field::new(column.name(), Type::Scalar(column_scalar_type(column)))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let output_schema = editor.intern_schema(output);
+            let project = editor.append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Project)
+                    .with_operands(vec![relation])
+                    .with_result(Type::relation(output_schema)),
+            )?;
+            let region = editor.add_region(project)?;
+            let block = editor.append_block(region, field_types.clone())?;
+            let mut yielded = Vec::with_capacity(projection.len());
+            for index in projection {
+                yielded.push(editor.block_argument(block, *index)?);
+            }
+            editor.append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
+            )?;
+            relation = editor.result(project, 0)?;
         }
 
         editor.append_operation(

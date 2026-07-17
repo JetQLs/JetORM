@@ -2010,11 +2010,14 @@ dependencies = [
  "jetorm-entity",
  "jetorm-executor",
  "jetorm-schema",
+ "rust_decimal",
  "serde",
+ "serde_json",
  "sqlx",
  "testcontainers-modules",
  "tokio",
  "toml",
+ "uuid",
 ]
 
 [[package]]

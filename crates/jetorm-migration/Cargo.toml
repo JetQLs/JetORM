@@ -21,9 +21,12 @@ jetorm-dialect.workspace = true
 jetorm-entity.workspace = true
 jetorm-executor.workspace = true
 jetorm-schema.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 toml.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 jetorm-entity.workspace = true

@@ -37,9 +37,11 @@ mod history;
 mod introspect;
 mod migration;
 mod migrator;
+mod seed;
 
 pub use error::MigrationError;
 pub use history::{AppliedMigration, HISTORY_TABLE};
 pub use introspect::{Introspection, SkippedColumn, introspect};
 pub use migration::{Migration, MigrationSet, MigrationStep};
 pub use migrator::{MigrationState, MigrationStatus, Migrator};
+pub use seed::{SeedFile, SeedReport, SeedTable, apply_seeds};

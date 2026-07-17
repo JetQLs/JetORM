@@ -214,6 +214,29 @@ confirm by editing the file. Generated migrations have empty `down`
 steps (reversal is not derivable); `jet migrate down --count 1 --yes`
 refuses migrations without them.
 
+**Seed data** is declarative TOML too, applied idempotently through
+upserts — the file is the truth, `jet seed` makes the database agree
+with it, and reapplying always converges:
+
+```toml
+# seeds/roles.toml
+[[rows]]
+table = "roles"
+key = ["name"]            # the upsert's conflict arbiter
+
+[[rows.values]]
+name = "admin"
+rank = 1
+```
+
+```console
+$ jet seed --dir seeds --schema schema.toml
+```
+
+Rows are validated against the schema before anything executes, and
+the whole application is one transaction — a mistyped value rolls
+everything back with an error naming the file, table, row, and column.
+
 **Existing database?** Start from it:
 
 ```console

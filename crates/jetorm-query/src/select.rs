@@ -99,7 +99,7 @@ pub(crate) enum StatementKind {
     Exists,
     Insert {
         rows: usize,
-        conflict: u8,
+        conflict: crate::mutation::InsertConflict,
         returning: bool,
     },
     Update {

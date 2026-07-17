@@ -68,7 +68,7 @@ fn lower_insert<E: Entity>(insert: &Insert<E>) -> Result<Module, LoweringError> 
         .enumerate()
         .filter(|(_, column)| !column.is_auto_increment())
         .collect::<Vec<_>>();
-    let conflict = match insert.conflict {
+    let conflict = match &insert.conflict {
         InsertConflict::None => None,
         InsertConflict::DoNothing => Some(ConflictClause::do_nothing(primary_key_target::<E>())),
         InsertConflict::UpdateInserted => {
@@ -82,6 +82,22 @@ fn lower_insert<E: Entity>(insert: &Insert<E>) -> Result<Module, LoweringError> 
                 return Err(LoweringError::EmptyUpsertUpdate);
             }
             Some(ConflictClause::do_update(target, assignments))
+        }
+        InsertConflict::TargetedIgnore { target } => Some(ConflictClause::do_nothing(Some(
+            ConflictTarget::Columns(column_names::<E>(target)),
+        ))),
+        InsertConflict::TargetedUpdate { target, update } => {
+            let assignments = update
+                .iter()
+                .map(|index| {
+                    let name = E::COLUMNS[*index].name();
+                    UpsertAssignment::new(name, name)
+                })
+                .collect();
+            Some(ConflictClause::do_update(
+                ConflictTarget::Columns(column_names::<E>(target)),
+                assignments,
+            ))
         }
     };
 
@@ -262,6 +278,14 @@ fn returning_columns<E: Entity>(returning: bool) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+/// Spells column positions as their SQL names.
+fn column_names<E: Entity>(indexes: &[usize]) -> Vec<String> {
+    indexes
+        .iter()
+        .map(|index| E::COLUMNS[*index].name().to_owned())
+        .collect()
 }
 
 fn primary_key_target<E: Entity>() -> Option<ConflictTarget> {

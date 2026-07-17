@@ -19,12 +19,25 @@ pub struct Insert<E: Entity> {
     entity: PhantomData<fn() -> E>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum InsertConflict {
     #[default]
     None,
     DoNothing,
     UpdateInserted,
+    /// `DO NOTHING` restricted to an explicit column arbiter.
+    TargetedIgnore {
+        /// Conflict-target column positions within `E::COLUMNS`.
+        target: Vec<usize>,
+    },
+    /// `DO UPDATE` on an explicit column arbiter, assigning the named
+    /// columns from the excluded input row.
+    TargetedUpdate {
+        /// Conflict-target column positions within `E::COLUMNS`.
+        target: Vec<usize>,
+        /// Assigned column positions within `E::COLUMNS`.
+        update: Vec<usize>,
+    },
 }
 
 impl<E: Entity> Insert<E> {
@@ -48,7 +61,7 @@ impl<E: Entity> Insert<E> {
     ///
     /// When the entity declares no primary key, every conflict is ignored.
     #[must_use]
-    pub const fn on_conflict_do_nothing(mut self) -> Self {
+    pub fn on_conflict_do_nothing(mut self) -> Self {
         self.conflict = InsertConflict::DoNothing;
         self
     }
@@ -56,9 +69,26 @@ impl<E: Entity> Insert<E> {
     /// Updates inserted, non-key, non-auto-incrementing columns when the
     /// primary key conflicts.
     #[must_use]
-    pub const fn on_conflict_update(mut self) -> Self {
+    pub fn on_conflict_update(mut self) -> Self {
         self.conflict = InsertConflict::UpdateInserted;
         self
+    }
+
+    /// Chooses an explicit conflict arbiter from the given columns.
+    ///
+    /// The columns must be covered by a unique index or constraint on the
+    /// live table — the database enforces this when the statement is
+    /// prepared. Follow with [`OnConflict::ignore`] or
+    /// [`OnConflict::update_columns`] to choose what a conflict does.
+    #[must_use]
+    pub fn on_conflict<T>(self, _target: T) -> OnConflict<E>
+    where
+        T: crate::projection::ColumnList<E>,
+    {
+        OnConflict {
+            insert: self,
+            target: T::indexes(),
+        }
     }
 
     /// Returns complete entity rows affected by the insert or upsert.
@@ -84,16 +114,11 @@ impl<E: Entity> Insert<E> {
     }
 
     pub(crate) fn shape(&self) -> QueryShape {
-        let conflict = match self.conflict {
-            InsertConflict::None => 0,
-            InsertConflict::DoNothing => 1,
-            InsertConflict::UpdateInserted => 2,
-        };
         QueryShape::for_mutation::<E>(
             None,
             StatementKind::Insert {
                 rows: self.rows.len(),
-                conflict,
+                conflict: self.conflict.clone(),
                 returning: self.returning,
             },
         )
@@ -136,15 +161,89 @@ impl<E: Entity> Insert<E> {
                 })?;
         ensure_bind_capacity(bind_count)?;
 
-        if self.conflict == InsertConflict::UpdateInserted {
-            if E::PRIMARY_KEY.is_empty() {
-                return Err(LoweringError::MissingPrimaryKey);
+        match &self.conflict {
+            InsertConflict::None
+            | InsertConflict::DoNothing
+            | InsertConflict::TargetedIgnore { .. } => {}
+            InsertConflict::UpdateInserted => {
+                if E::PRIMARY_KEY.is_empty() {
+                    return Err(LoweringError::MissingPrimaryKey);
+                }
+                // A generated key never appears in the inserted columns, so
+                // arbitrating on it could never conflict — the update arm
+                // would be dead code, silently.
+                if let Some(column) = E::PRIMARY_KEY
+                    .iter()
+                    .map(|index| &E::COLUMNS[*index])
+                    .find(|column| column.is_auto_increment())
+                {
+                    return Err(LoweringError::UpsertKeyGenerated {
+                        column: column.name().to_owned(),
+                    });
+                }
+                if included.iter().all(|column| column.is_primary_key()) {
+                    return Err(LoweringError::EmptyUpsertUpdate);
+                }
             }
-            if included.iter().all(|column| column.is_primary_key()) {
-                return Err(LoweringError::EmptyUpsertUpdate);
+            InsertConflict::TargetedUpdate { target, update } => {
+                if update.is_empty() {
+                    return Err(LoweringError::EmptyUpsertUpdate);
+                }
+                for index in update {
+                    let column = &E::COLUMNS[*index];
+                    // An excluded auto-increment value is the sequence's
+                    // next number, never the caller's data; assigning it
+                    // — or a conflict-target column onto itself — asks
+                    // for something the statement cannot mean.
+                    if column.is_auto_increment() {
+                        return Err(LoweringError::UpsertAssignsGenerated {
+                            column: column.name().to_owned(),
+                        });
+                    }
+                    if target.contains(index) {
+                        return Err(LoweringError::UpsertAssignsTarget {
+                            column: column.name().to_owned(),
+                        });
+                    }
+                }
             }
         }
         Ok(())
+    }
+}
+
+/// A chosen conflict arbiter awaiting its action.
+///
+/// Produced by [`Insert::on_conflict`]; finish with [`Self::ignore`] or
+/// [`Self::update_columns`].
+#[derive(Clone, Debug)]
+pub struct OnConflict<E: Entity> {
+    insert: Insert<E>,
+    target: Vec<usize>,
+}
+
+impl<E: Entity> OnConflict<E> {
+    /// Skips rows conflicting on the chosen arbiter.
+    #[must_use]
+    pub fn ignore(mut self) -> Insert<E> {
+        self.insert.conflict = InsertConflict::TargetedIgnore {
+            target: self.target,
+        };
+        self.insert
+    }
+
+    /// Assigns the given columns from the excluded input row when the
+    /// chosen arbiter conflicts.
+    #[must_use]
+    pub fn update_columns<U>(mut self, _columns: U) -> Insert<E>
+    where
+        U: crate::projection::ColumnList<E>,
+    {
+        self.insert.conflict = InsertConflict::TargetedUpdate {
+            target: self.target,
+            update: U::indexes(),
+        };
+        self.insert
     }
 }
 
@@ -488,6 +587,17 @@ pub trait EntityMutation: Entity {
     #[must_use]
     fn insert(model: Self::Model) -> Insert<Self> {
         Insert::new(model)
+    }
+
+    /// Inserts the model, updating every non-key inserted column when the
+    /// primary key conflicts.
+    ///
+    /// Shorthand for `insert(model).on_conflict_update()`; use
+    /// [`Insert::on_conflict`] to arbitrate on other unique columns or to
+    /// choose the updated columns.
+    #[must_use]
+    fn upsert(model: Self::Model) -> Insert<Self> {
+        Insert::new(model).on_conflict_update()
     }
 
     /// Starts an update with no assignments and no selected rows.

@@ -77,6 +77,22 @@ pub enum LoweringError {
     MissingPrimaryKey,
     /// An upsert has no writable non-key columns for its update action.
     EmptyUpsertUpdate,
+    /// A primary-key upsert whose key is database-generated could never
+    /// conflict: the key is not among the inserted columns.
+    UpsertKeyGenerated {
+        /// The auto-incrementing key column.
+        column: String,
+    },
+    /// An upsert assigns a database-generated column from the excluded row.
+    UpsertAssignsGenerated {
+        /// The auto-incrementing column named in the update list.
+        column: String,
+    },
+    /// An upsert assigns one of its own conflict-target columns.
+    UpsertAssignsTarget {
+        /// The column named in both the target and the update list.
+        column: String,
+    },
     /// A model violated the positional row-width contract during insert lowering.
     ModelWidthMismatch {
         /// Zero-based inserted row index.
@@ -136,6 +152,18 @@ impl fmt::Display for LoweringError {
             Self::EmptyUpsertUpdate => {
                 formatter.write_str("upsert requires at least one writable non-key column")
             }
+            Self::UpsertKeyGenerated { column } => write!(
+                formatter,
+                "primary-key upsert cannot conflict: key column {column:?} is                  database-generated and never inserted; arbitrate with                  on_conflict over a unique column instead"
+            ),
+            Self::UpsertAssignsGenerated { column } => write!(
+                formatter,
+                "upsert cannot assign auto-incrementing column {column:?}; the                  excluded value is the sequence's next number, not the caller's data"
+            ),
+            Self::UpsertAssignsTarget { column } => write!(
+                formatter,
+                "upsert assigns conflict-target column {column:?} to itself;                  drop it from the update list"
+            ),
             Self::ModelWidthMismatch {
                 row,
                 expected,
@@ -167,6 +195,9 @@ impl Error for LoweringError {
             | Self::EmptyInsert
             | Self::MissingPrimaryKey
             | Self::EmptyUpsertUpdate
+            | Self::UpsertKeyGenerated { .. }
+            | Self::UpsertAssignsGenerated { .. }
+            | Self::UpsertAssignsTarget { .. }
             | Self::ModelWidthMismatch { .. }
             | Self::CapacityExceeded { .. } => None,
         }

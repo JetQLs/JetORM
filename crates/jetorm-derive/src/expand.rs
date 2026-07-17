@@ -34,7 +34,7 @@ const RAW_ONLY_KEYWORDS: &[&str] = &[
 const RESERVED_NAMES: &[&str] = &["self", "Self", "super", "crate"];
 
 /// Strips a raw identifier's `r#` prefix, leaving the name it spells.
-fn unraw(ident: &Ident) -> String {
+pub(crate) fn unraw(ident: &Ident) -> String {
     let spelled = ident.to_string();
     spelled
         .strip_prefix("r#")
@@ -42,7 +42,7 @@ fn unraw(ident: &Ident) -> String {
 }
 
 /// Builds an identifier, escaping it as raw when the name is a keyword.
-fn type_ident(name: &str, span: Span) -> Result<Ident, String> {
+pub(crate) fn type_ident(name: &str, span: Span) -> Result<Ident, String> {
     if RESERVED_NAMES.contains(&name) {
         return Err(format!(
             "the generated name `{name}` is reserved by Rust and cannot be escaped; \
@@ -425,7 +425,7 @@ fn snake_case(input: &str) -> String {
     output
 }
 
-fn pascal_case(input: &str) -> String {
+pub(crate) fn pascal_case(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut uppercase_next = true;
     for character in input.chars() {

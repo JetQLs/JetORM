@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use jetorm_dialect::Statement;
+use jetorm_dialect::{Statement, StatementResult};
 use jetorm_entity::{ColumnType, Value};
 use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
 use tracing::Instrument;
@@ -26,7 +26,7 @@ mod sealed {
 /// Implemented for `&Database` (pooled execution) and `&mut Transaction`
 /// (execution inside one open transaction), following the reference-based
 /// executor pattern established by `sqlx`. The trait is sealed; its methods
-/// are plumbing for [`crate::SelectExecute`] rather than a public API.
+/// are plumbing for JetORM's typed execution traits rather than a driver API.
 pub trait Executor: sealed::Sealed + Send + Sized {
     /// Returns the plan cache shared through this executor.
     #[doc(hidden)]
@@ -45,6 +45,14 @@ pub trait Executor: sealed::Sealed + Send + Sized {
         binds: Vec<Value>,
         columns: Vec<ColumnType>,
     ) -> impl Future<Output = Result<Vec<JetRow>, ExecuteError>> + Send;
+
+    /// Executes one command and returns the database-reported affected-row count.
+    #[doc(hidden)]
+    fn execute_statement(
+        self,
+        statement: Arc<Statement>,
+        binds: Vec<Value>,
+    ) -> impl Future<Output = Result<u64, ExecuteError>> + Send;
 }
 
 /// A PostgreSQL connection pool with its shared plan cache.
@@ -258,6 +266,7 @@ impl Executor for &Database {
         let span = query_span(&statement, binds.len());
         let recorder = span.clone();
         async move {
+            require_result(&statement, StatementResult::Rows)?;
             let query = build_query(&statement, &binds)?;
             let rows = query.fetch_all(&self.pool).await?;
             // Recording on the held span, not the current one: when this
@@ -265,6 +274,24 @@ impl Executor for &Database {
             // encloses the caller, which must not receive our field.
             recorder.record("db.response.returned_rows", rows.len());
             rows.iter().map(|row| decode_row(row, &columns)).collect()
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn execute_statement(
+        self,
+        statement: Arc<Statement>,
+        binds: Vec<Value>,
+    ) -> Result<u64, ExecuteError> {
+        let span = query_span(&statement, binds.len());
+        let recorder = span.clone();
+        async move {
+            require_result(&statement, StatementResult::AffectedRows)?;
+            let query = build_query(&statement, &binds)?;
+            let affected = query.execute(&self.pool).await?.rows_affected();
+            recorder.record("db.response.affected_rows", affected);
+            Ok(affected)
         }
         .instrument(span)
         .await
@@ -282,6 +309,7 @@ fn query_span(statement: &Statement, binds: usize) -> tracing::Span {
         db.query.text = statement.sql(),
         db.operation.parameter_count = binds,
         db.response.returned_rows = tracing::field::Empty,
+        db.response.affected_rows = tracing::field::Empty,
     )
 }
 
@@ -342,6 +370,7 @@ impl Executor for &mut Transaction<'_> {
         let span = query_span(&statement, binds.len());
         let recorder = span.clone();
         async move {
+            require_result(&statement, StatementResult::Rows)?;
             let query = build_query(&statement, &binds)?;
             let rows = query.fetch_all(&mut *self.inner).await?;
             recorder.record("db.response.returned_rows", rows.len());
@@ -349,5 +378,32 @@ impl Executor for &mut Transaction<'_> {
         }
         .instrument(span)
         .await
+    }
+
+    async fn execute_statement(
+        self,
+        statement: Arc<Statement>,
+        binds: Vec<Value>,
+    ) -> Result<u64, ExecuteError> {
+        let span = query_span(&statement, binds.len());
+        let recorder = span.clone();
+        async move {
+            require_result(&statement, StatementResult::AffectedRows)?;
+            let query = build_query(&statement, &binds)?;
+            let affected = query.execute(&mut *self.inner).await?.rows_affected();
+            recorder.record("db.response.affected_rows", affected);
+            Ok(affected)
+        }
+        .instrument(span)
+        .await
+    }
+}
+
+fn require_result(statement: &Statement, expected: StatementResult) -> Result<(), ExecuteError> {
+    let actual = statement.result();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ExecuteError::ResultMismatch { expected, actual })
     }
 }

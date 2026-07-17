@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    BinaryOperator, BlockId, Literal, LogicalOp, Module, OperationId, OperationKind, ProfileSiteId,
-    RegionId, RegionParent, ScalarOp, SchemaId, SqlType, TerminatorOp, Type, UnaryOperator,
-    ValueDefinition, ValueId, ValueUse, WindowFrameBound, WindowFrameUnit, WindowSpec,
+    BinaryOperator, BlockId, ConflictAction, ConflictClause, ConflictTarget, Literal, LogicalOp,
+    Module, MutationOp, OperationId, OperationKind, ProfileSiteId, RegionId, RegionParent,
+    ScalarOp, SchemaId, SqlType, TerminatorOp, Type, UnaryOperator, ValueDefinition, ValueId,
+    ValueUse, WindowFrameBound, WindowFrameUnit, WindowSpec,
 };
 
 /// Arena entity associated with one verifier diagnostic.
@@ -634,6 +635,15 @@ impl Verifier<'_> {
                 }
                 self.verify_logical(operation_id, &logical);
             }
+            OperationKind::Mutation(mutation) => {
+                if !operation.successors().is_empty() {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "mutation operation cannot have CFG successors",
+                    );
+                }
+                self.verify_mutation(operation_id, &mutation);
+            }
             OperationKind::Scalar(scalar) => {
                 if !operation.regions().is_empty() || !operation.successors().is_empty() {
                     self.error(
@@ -665,10 +675,11 @@ impl Verifier<'_> {
                         VerificationLocation::Operation(operation_id),
                         "yield is valid only inside an operation-owned region",
                     ),
-                    TerminatorOp::QueryReturn if !in_root => self.error(
-                        VerificationLocation::Operation(operation_id),
-                        "query return is valid only in the module root block",
-                    ),
+                    TerminatorOp::QueryReturn | TerminatorOp::CommandReturn if !in_root => self
+                        .error(
+                            VerificationLocation::Operation(operation_id),
+                            "query and command returns are valid only in the module root block",
+                        ),
                     TerminatorOp::QueryReturn => {
                         if operation.operands().len() != 1
                             || self
@@ -679,6 +690,16 @@ impl Verifier<'_> {
                             self.error(
                                 VerificationLocation::Operation(operation_id),
                                 "query return requires exactly one relation operand",
+                            );
+                        }
+                    }
+                    TerminatorOp::CommandReturn => {
+                        if operation.operands().len() != 1
+                            || self.operand_type(operation_id, 0) != Some(&Type::Unit)
+                        {
+                            self.error(
+                                VerificationLocation::Operation(operation_id),
+                                "command return requires exactly one unit operand",
                             );
                         }
                     }
@@ -840,6 +861,30 @@ impl Verifier<'_> {
                 self.expect_shape(operation_id, 1, 1, 0);
                 self.expect_same_relation_io(operation_id);
             }
+            LogicalOp::Exists => {
+                self.expect_shape(operation_id, 1, 1, 0);
+                if self.operand_schema(operation_id, 0).is_none() {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "exists requires one relation operand",
+                    );
+                }
+                let valid_result =
+                    self.result_schema(operation_id, 0)
+                        .and_then(|schema| self.module.schema(schema))
+                        .is_some_and(|schema| {
+                            schema.fields().len() == 1
+                                && schema.fields()[0].ty().as_scalar().is_some_and(|scalar| {
+                                    scalar.is_boolean() && !scalar.is_nullable()
+                                })
+                        });
+                if !valid_result {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "exists must produce a one-field non-null Boolean relation",
+                    );
+                }
+            }
             LogicalOp::Set { .. } => {
                 if operation.operands().len() < 2
                     || operation.results().len() != 1
@@ -863,6 +908,342 @@ impl Verifier<'_> {
                     );
                 }
             }
+        }
+    }
+
+    fn verify_mutation(&mut self, operation_id: OperationId, mutation: &MutationOp) {
+        self.expect_shape(operation_id, 0, 1, 1);
+        let Some(table_schema) = self.module.schema(mutation.schema()) else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "mutation references a stale table schema",
+            );
+            return;
+        };
+        if mutation.table().name().is_empty() {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "mutation table name must not be empty",
+            );
+        }
+
+        let table_fields: Vec<(String, Type)> = table_schema
+            .fields()
+            .iter()
+            .map(|field| (field.name().to_owned(), field.ty().clone()))
+            .collect();
+        self.verify_mutation_result(operation_id, &table_fields, mutation.returning());
+
+        match mutation {
+            MutationOp::Insert {
+                columns,
+                rows,
+                conflict,
+                ..
+            } => {
+                if *rows == 0 {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "insert must contain at least one row",
+                    );
+                }
+                let column_types = self.verify_named_columns(
+                    operation_id,
+                    &table_fields,
+                    columns,
+                    "insert column",
+                    true,
+                );
+                let expected = usize::try_from(*rows)
+                    .ok()
+                    .and_then(|rows| rows.checked_mul(column_types.len()));
+                match expected {
+                    Some(count) => {
+                        let mut types = Vec::with_capacity(count);
+                        for _ in 0..*rows {
+                            types.extend(column_types.iter().cloned());
+                        }
+                        self.verify_mutation_region(operation_id, &[], &types, false);
+                    }
+                    None => self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "insert value count overflows this target",
+                    ),
+                }
+                if let Some(conflict) = conflict {
+                    self.verify_conflict(operation_id, &table_fields, columns, conflict);
+                }
+            }
+            MutationOp::Update { assignments, .. } => {
+                let assignment_types = self.verify_named_columns(
+                    operation_id,
+                    &table_fields,
+                    assignments,
+                    "update assignment",
+                    true,
+                );
+                let mut yielded = Vec::with_capacity(assignment_types.len() + 1);
+                yielded.push(Type::boolean(false));
+                yielded.extend(assignment_types);
+                let arguments = table_fields
+                    .iter()
+                    .map(|(_, ty)| ty.clone())
+                    .collect::<Vec<_>>();
+                self.verify_mutation_region(operation_id, &arguments, &yielded, true);
+            }
+            MutationOp::Delete { .. } => {
+                let arguments = table_fields
+                    .iter()
+                    .map(|(_, ty)| ty.clone())
+                    .collect::<Vec<_>>();
+                self.verify_mutation_region(
+                    operation_id,
+                    &arguments,
+                    &[Type::boolean(false)],
+                    true,
+                );
+            }
+        }
+    }
+
+    fn verify_mutation_result(
+        &mut self,
+        operation_id: OperationId,
+        table_fields: &[(String, Type)],
+        returning: &[String],
+    ) {
+        if returning.is_empty() {
+            if self.result_type(operation_id, 0) != Some(&Type::Unit) {
+                self.error(
+                    VerificationLocation::Operation(operation_id),
+                    "mutation without returning columns must produce unit",
+                );
+            }
+            return;
+        }
+        let expected = self.verify_named_columns(
+            operation_id,
+            table_fields,
+            returning,
+            "returning column",
+            true,
+        );
+        let actual = self
+            .result_schema(operation_id, 0)
+            .and_then(|schema| self.module.schema(schema));
+        let matches = actual.is_some_and(|schema| {
+            schema.fields().len() == returning.len()
+                && schema
+                    .fields()
+                    .iter()
+                    .zip(returning.iter().zip(expected.iter()))
+                    .all(|(field, (name, ty))| field.name() == name && field.ty() == ty)
+        });
+        if !matches {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "mutation result schema must match returning columns in order",
+            );
+        }
+    }
+
+    fn verify_named_columns(
+        &mut self,
+        operation_id: OperationId,
+        table_fields: &[(String, Type)],
+        names: &[String],
+        label: &str,
+        require_nonempty: bool,
+    ) -> Vec<Type> {
+        if require_nonempty && names.is_empty() {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                format!("{label} list must not be empty"),
+            );
+        }
+        let mut seen = HashSet::new();
+        let mut types = Vec::with_capacity(names.len());
+        for name in names {
+            if name.is_empty() {
+                self.error(
+                    VerificationLocation::Operation(operation_id),
+                    format!("{label} name must not be empty"),
+                );
+            }
+            if !seen.insert(name.as_str()) {
+                self.error(
+                    VerificationLocation::Operation(operation_id),
+                    format!("duplicate {label} {name:?}"),
+                );
+            }
+            match table_fields.iter().find(|(field, _)| field == name) {
+                Some((_, ty)) => types.push(ty.clone()),
+                None => self.error(
+                    VerificationLocation::Operation(operation_id),
+                    format!("unknown {label} {name:?}"),
+                ),
+            }
+        }
+        types
+    }
+
+    fn verify_conflict(
+        &mut self,
+        operation_id: OperationId,
+        table_fields: &[(String, Type)],
+        insert_columns: &[String],
+        conflict: &ConflictClause,
+    ) {
+        match conflict.target() {
+            Some(ConflictTarget::Columns(columns)) => {
+                self.verify_named_columns(
+                    operation_id,
+                    table_fields,
+                    columns,
+                    "conflict target column",
+                    true,
+                );
+            }
+            Some(ConflictTarget::Constraint(constraint)) if constraint.is_empty() => self.error(
+                VerificationLocation::Operation(operation_id),
+                "conflict constraint name must not be empty",
+            ),
+            Some(ConflictTarget::Constraint(_)) | None => {}
+        }
+        match conflict.action() {
+            ConflictAction::DoNothing => {}
+            ConflictAction::DoUpdate(assignments) => {
+                if conflict.target().is_none() {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "conflict update requires an explicit target",
+                    );
+                }
+                if assignments.is_empty() {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "conflict update requires at least one assignment",
+                    );
+                }
+                let mut targets = HashSet::new();
+                for assignment in assignments {
+                    if !targets.insert(assignment.target()) {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            format!("duplicate conflict assignment {:?}", assignment.target()),
+                        );
+                    }
+                    let target_type = table_fields
+                        .iter()
+                        .find(|(name, _)| name == assignment.target())
+                        .map(|(_, ty)| ty);
+                    if target_type.is_none() {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            format!(
+                                "unknown conflict assignment target {:?}",
+                                assignment.target()
+                            ),
+                        );
+                    }
+                    let source_type = table_fields
+                        .iter()
+                        .find(|(name, _)| name == assignment.source())
+                        .filter(|(name, _)| insert_columns.iter().any(|inserted| inserted == name))
+                        .map(|(_, ty)| ty);
+                    if source_type.is_none() {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            format!("conflict source {:?} is not inserted", assignment.source()),
+                        );
+                    }
+                    if let (Some(target), Some(source)) = (target_type, source_type)
+                        && target != source
+                    {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            format!(
+                                "conflict assignment target {:?} and source {:?} must have the same type",
+                                assignment.target(),
+                                assignment.source()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn verify_mutation_region(
+        &mut self,
+        operation_id: OperationId,
+        expected_arguments: &[Type],
+        expected_yields: &[Type],
+        boolean_predicate: bool,
+    ) {
+        let Some(operation) = self.module.operation(operation_id) else {
+            return;
+        };
+        let Some(region_id) = operation.regions().first().copied() else {
+            return;
+        };
+        let Some(region) = self.module.region(region_id) else {
+            return;
+        };
+        if region.blocks().len() != 1 {
+            self.error(
+                VerificationLocation::Region(region_id),
+                "mutation expression region must contain exactly one block",
+            );
+            return;
+        }
+        let block_id = region.blocks()[0];
+        let Some(block) = self.module.block(block_id) else {
+            return;
+        };
+        let actual_arguments = block
+            .arguments()
+            .iter()
+            .filter_map(|argument| self.module.value(*argument).map(|value| value.ty().clone()))
+            .collect::<Vec<_>>();
+        if actual_arguments != expected_arguments {
+            self.error(
+                VerificationLocation::Block(block_id),
+                "mutation region arguments do not match the table row schema",
+            );
+        }
+        let Some(terminator_id) = block.operations().last().copied() else {
+            return;
+        };
+        let Some(terminator) = self.module.operation(terminator_id) else {
+            return;
+        };
+        if terminator.kind() != &OperationKind::Terminator(TerminatorOp::Yield) {
+            self.error(
+                VerificationLocation::Operation(terminator_id),
+                "mutation expression region must end in yield",
+            );
+            return;
+        }
+        let actual_yields = terminator
+            .operands()
+            .iter()
+            .filter_map(|value| self.module.value(*value).map(|stored| stored.ty().clone()))
+            .collect::<Vec<_>>();
+        let yields_match = if boolean_predicate {
+            actual_yields.len() == expected_yields.len()
+                && actual_yields
+                    .first()
+                    .is_some_and(|ty| ty.as_scalar().is_some_and(super::ScalarType::is_boolean))
+                && actual_yields.get(1..) == expected_yields.get(1..)
+        } else {
+            actual_yields == expected_yields
+        };
+        if !yields_match {
+            self.error(
+                VerificationLocation::Operation(terminator_id),
+                "mutation yielded values do not match its declared columns",
+            );
         }
     }
 
@@ -1072,7 +1453,7 @@ impl Verifier<'_> {
             ScalarOp::Call { .. } => {
                 self.verify_scalar_call_operands(operation_id, "function");
             }
-            ScalarOp::AggregateCall { .. } => {
+            ScalarOp::AggregateCall { distinct, star, .. } => {
                 if !matches!(
                     self.enclosing_logical(operation_id),
                     Some(LogicalOp::Aggregate { .. })
@@ -1083,6 +1464,12 @@ impl Verifier<'_> {
                     );
                 }
                 self.verify_scalar_call_operands(operation_id, "aggregate");
+                if *star && (operand_count != 0 || *distinct) {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "aggregate wildcard requires zero operands and cannot be distinct",
+                    );
+                }
                 self.verify_no_nested_aggregate_or_window_calls(operation_id, "aggregate");
             }
             ScalarOp::WindowCall {
@@ -1351,6 +1738,7 @@ impl Verifier<'_> {
                         dependencies
                     }
                     OperationKind::Logical(_)
+                    | OperationKind::Mutation(_)
                     | OperationKind::Terminator(_)
                     | OperationKind::Extension(_) => AggregateDependencies::default(),
                 }

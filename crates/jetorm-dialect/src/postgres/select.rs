@@ -1,11 +1,11 @@
 use afterburner::ir::{
     LogicalOp, Module, NullOrder, OperationId, OperationKind, SchemaId, SortDirection, SortKey,
-    TableRef, TerminatorOp, Type, ValueDefinition, ValueId,
+    TerminatorOp, Type, ValueDefinition, ValueId,
 };
 
 use crate::error::RenderError;
-use crate::postgres::quote_identifier;
 use crate::postgres::scalar::{ParamMap, RowScope, literal_sql, render_value};
+use crate::postgres::{quote_identifier, table_sql};
 
 mod advanced;
 
@@ -245,6 +245,21 @@ impl<'module> Renderer<'module> {
                 builder.stage = Stage::Distinct;
                 Ok(builder)
             }
+            OperationKind::Logical(LogicalOp::Exists) => {
+                let input = self.input_relation(operation_id)?;
+                let input = self.build_relation(input)?.render()?;
+                let columns = self.result_columns(operation_id)?;
+                let column = columns.first().ok_or_else(|| {
+                    RenderError::inconsistent("exists result has no output column")
+                })?;
+                let alias = self.next_alias();
+                let from_item = format!(
+                    "(SELECT EXISTS ({input}) AS {}) AS {}",
+                    quote_identifier(column)?,
+                    quote_identifier(&alias)?
+                );
+                Ok(SelectBuilder::from_source(from_item, alias, columns))
+            }
             OperationKind::Logical(LogicalOp::Sort { keys }) => {
                 let input = self.input_relation(operation_id)?;
                 let mut builder = self.build_relation(input)?;
@@ -326,11 +341,11 @@ impl<'module> Renderer<'module> {
                 extension.dialect(),
                 extension.name()
             ))),
-            OperationKind::Scalar(_) | OperationKind::Terminator(_) => {
-                Err(RenderError::inconsistent(
-                    "relation position references a non-relational operation",
-                ))
-            }
+            OperationKind::Mutation(_)
+            | OperationKind::Scalar(_)
+            | OperationKind::Terminator(_) => Err(RenderError::inconsistent(
+                "relation position references a non-relational operation",
+            )),
         }
     }
 
@@ -592,21 +607,5 @@ impl<'module> Renderer<'module> {
         let alias = format!("t{}", self.alias_counter);
         self.alias_counter += 1;
         alias
-    }
-}
-
-fn table_sql(table: &TableRef) -> Result<String, RenderError> {
-    if table.catalog().is_some() {
-        return Err(RenderError::unsupported(
-            "PostgreSQL cannot reference tables in another catalog",
-        ));
-    }
-    match table.schema() {
-        Some(schema) => Ok(format!(
-            "{}.{}",
-            quote_identifier(schema)?,
-            quote_identifier(table.name())?
-        )),
-        None => quote_identifier(table.name()),
     }
 }

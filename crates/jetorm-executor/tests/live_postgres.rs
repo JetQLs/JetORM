@@ -19,8 +19,10 @@ use jetorm_dialect::{Dialect, Postgres as PostgresDialect};
 use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue, TableMeta, Value,
 };
-use jetorm_executor::{Database, SelectExecute};
-use jetorm_query::{ColumnExt, EntityQuery, TextColumnExt};
+use jetorm_executor::{
+    Database, ExistsExecute, MutationExecute, ProjectedExecute, ReturningExecute, SelectExecute,
+};
+use jetorm_query::{ColumnExt, EntityMutation, EntityQuery, TextColumnExt};
 use sqlx::Row;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -257,6 +259,78 @@ async fn repeated_shapes_reuse_the_plan_cache() {
 
 #[tokio::test]
 #[ignore = "requires a running Docker daemon"]
+async fn typed_behaviors_execute_on_postgres() {
+    let (_container, db) = fresh_database().await;
+    create_fixture(&db).await;
+
+    let inserted = UserEntity::insert(User {
+        id: 4,
+        name: "dave".to_owned(),
+        email: Some("dave@example.com".to_owned()),
+    })
+    .returning()
+    .one(&db)
+    .await
+    .expect("insert returning executes")
+    .expect("insert returns one row");
+    assert_eq!(inserted.id, 4);
+
+    let count = UserEntity::find()
+        .filter(Id.gt(1))
+        .count(&db)
+        .await
+        .expect("count executes");
+    assert_eq!(count, 3);
+    assert!(
+        UserEntity::find()
+            .filter(Id.eq(4))
+            .exists()
+            .get(&db)
+            .await
+            .expect("exists executes")
+    );
+
+    let email = UserEntity::find()
+        .filter(Id.eq(4))
+        .select((Email,))
+        .one(&db)
+        .await
+        .expect("projection executes");
+    assert_eq!(email, Some(Some("dave@example.com".to_owned())));
+
+    let updated = UserEntity::update()
+        .set(Name, "david")
+        .filter(Id.eq(4))
+        .execute(&db)
+        .await
+        .expect("update executes");
+    assert_eq!(updated, 1);
+
+    let upserted = UserEntity::insert(User {
+        id: 4,
+        name: "dave-upserted".to_owned(),
+        email: None,
+    })
+    .on_conflict_update()
+    .execute(&db)
+    .await
+    .expect("upsert executes");
+    assert_eq!(upserted, 1);
+
+    let deleted = UserEntity::delete()
+        .filter(Id.eq(4))
+        .returning()
+        .one(&db)
+        .await
+        .expect("delete returning executes")
+        .expect("delete returns one row");
+    assert_eq!(deleted.name, "dave-upserted");
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
 async fn dropped_transactions_roll_back() {
     let (_container, db) = fresh_database().await;
     create_fixture(&db).await;
@@ -428,6 +502,7 @@ fn advanced_codegen_module() -> Module {
                 OperationSpec::new(ScalarOp::AggregateCall {
                     function: FunctionRef::new("count"),
                     distinct: false,
+                    star: false,
                     volatility: Volatility::Immutable,
                     effects: EffectSet::PURE,
                 })

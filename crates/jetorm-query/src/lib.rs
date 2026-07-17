@@ -1,19 +1,21 @@
-//! Typed query construction and AfterBurner IR lowering for JetORM.
+//! Typed query and mutation construction with AfterBurner IR lowering for JetORM.
 //!
 //! This crate is the frontend layer between entity metadata and the
 //! `afterburner` optimizer. Queries are assembled through a typed builder
-//! whose expressions are checked against column Rust types at compile time,
-//! stored as a small backend-independent AST, and lowered into verified
-//! AfterBurner IR through [`afterburner::IntoAfterBurnerIr`].
+//! whose expressions are checked against column Rust types at compile time and
+//! stored as a small backend-independent AST. [`afterburner::IntoAfterBurnerIr`]
+//! lowers that AST, while [`afterburner::afterburner!`] adds verification at
+//! the frontend boundary. Inserts, updates, deletes, upserts, and `RETURNING`
+//! use the same path without accepting raw SQL text.
 //!
 //! # Parameters, not literals
 //!
 //! Every user-supplied value becomes an IR parameter, never a literal. The
-//! value itself is retained in the query's positional bind table
-//! ([`Select::binds`]). Two queries that differ only in bound values
-//! therefore lower to structurally identical IR, which keeps plan caches and
-//! profile-guided optimization keyed on one stable fingerprint per query
-//! shape.
+//! value itself is retained in the builder's positional bind table, exposed
+//! by methods such as [`Select::binds`] and [`Insert::binds`]. Two builders
+//! that differ only in bound values therefore lower to structurally identical
+//! IR. Shape-based plan caches reuse one rendered statement, while stable IR
+//! fingerprints give profile-guided optimization one identity after lowering.
 //!
 //! # Example
 //!
@@ -66,10 +68,12 @@
 #![warn(missing_docs)]
 
 mod aggregate;
+mod behavior;
 mod cursor;
 mod expr;
 mod join;
 mod lowering;
+mod mutation;
 mod projection;
 mod select;
 
@@ -77,9 +81,11 @@ pub use aggregate::{
     Aggregate, AggregateFunction, AggregateList, AggregateSpec, Averageable, Comparable, GroupBy,
     GroupedSelect, Summable, avg, count_rows, max, min, sum,
 };
+pub use behavior::Exists;
 pub use cursor::{Cursor, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use join::JoinSelect;
 pub use lowering::LoweringError;
+pub use mutation::{Delete, EntityMutation, Insert, Returning, Update};
 pub use projection::{ColumnList, Projected};
 pub use select::{CacheableQuery, CountQuery, EntityQuery, QueryShape, Select};

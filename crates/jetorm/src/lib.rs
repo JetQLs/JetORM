@@ -1,9 +1,9 @@
 //! JetORM — a typed async ORM built on the AfterBurner query optimizer.
 //!
 //! This facade re-exports the JetORM frontend as one dependency. Application
-//! code derives entity metadata with [`JetModel`], builds typed queries with
-//! [`Select`], and lowers them into verified AfterBurner IR; SQL rendering
-//! and execution layers consume that IR downstream.
+//! code derives entity metadata with [`JetModel`], builds typed reads and
+//! mutations, and lowers them into verified AfterBurner IR; SQL rendering and
+//! execution layers consume that IR downstream.
 //!
 //! # Example
 //!
@@ -46,7 +46,7 @@
 
 pub use afterburner::{AfterBurnerError, AfterBurnerOptions, IntoAfterBurnerIr, afterburner, ir};
 pub use jetorm_derive::{JetEnum, JetModel, JetPartial};
-pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement};
+pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement, StatementResult};
 pub use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, ForeignKeyMeta, ForeignKeyRef, Inverse,
     Json, Model, ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta, Value,
@@ -54,27 +54,28 @@ pub use jetorm_entity::{
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
-    CursorExecute, Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, GroupedExecute,
-    JetRow, JoinExecute, PaginateExecute, Paginator, PlanCache, ProjectedExecute, SelectExecute,
-    Transaction, load_many, load_one,
+    CursorExecute, Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, ExistsExecute,
+    GroupedExecute, JetRow, JoinExecute, MutationExecute, PaginateExecute, Paginator, PlanCache,
+    ProjectedExecute, ReturningExecute, SelectExecute, Transaction, load_many, load_one,
 };
 pub use jetorm_query::{
     Aggregate, AggregateFunction, AggregateList, AggregateSpec, Averageable, CacheableQuery,
-    ColumnExt, ColumnList, Comparable, CountQuery, Cursor, CursorPage, EntityQuery, Expr, GroupBy,
-    GroupedSelect, JoinSelect, LoweringError, OrderKey, Projected, Select, Summable, TextColumnExt,
-    avg, count_rows, max, min, sum,
+    ColumnExt, ColumnList, Comparable, CountQuery, Cursor, CursorPage, Delete, EntityMutation,
+    EntityQuery, Exists, Expr, GroupBy, GroupedSelect, Insert, JoinSelect, LoweringError, OrderKey,
+    Projected, Returning, Select, Summable, TextColumnExt, Update, avg, count_rows, max, min, sum,
 };
 
 /// Single-import surface for application code.
 pub mod prelude {
     pub use crate::{
-        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, Inverse, JetEnum, JetModel,
-        JetPartial, Json, Model, OrderKey, Projected, Relation, Select, SqlValue, TextColumnExt,
-        Value,
+        Column, ColumnExt, ColumnList, Entity, EntityMutation, EntityQuery, Expr, Inverse, JetEnum,
+        JetModel, JetPartial, Json, Model, OrderKey, Projected, Relation, Select, SqlValue,
+        TextColumnExt, Value,
     };
     #[cfg(feature = "executor")]
     pub use crate::{
-        CursorExecute, Database, GroupedExecute, JoinExecute, PaginateExecute, ProjectedExecute,
-        SelectExecute, Transaction, load_many, load_one,
+        CursorExecute, Database, ExistsExecute, GroupedExecute, JoinExecute, MutationExecute,
+        PaginateExecute, ProjectedExecute, ReturningExecute, SelectExecute, Transaction, load_many,
+        load_one,
     };
 }

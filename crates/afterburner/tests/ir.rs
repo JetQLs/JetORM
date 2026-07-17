@@ -1,10 +1,10 @@
 use afterburner::ir::{
-    AttachmentError, Attribute, BinaryOperator, BlockId, EditError, EffectSet, Field, FunctionRef,
-    JoinKind, Literal, LogicalOp, Module, NullOrder, OperationId, OperationKind, OperationSpec,
-    ProfileSiteId, RegionId, ScalarOp, Schema, SortDirection, SortKey, SourceSpan, SqlType,
-    TerminatorOp, Type, ValueId, VerificationLocation, Volatility, WalkOrder, WindowFrame,
-    WindowFrameBound, WindowFrameUnit, WindowSpec, collect_operations, structural_fingerprint,
-    verify_module,
+    AttachmentError, Attribute, BinaryOperator, BlockId, ConflictClause, ConflictTarget, EditError,
+    EffectSet, Field, FunctionRef, JoinKind, Literal, LogicalOp, Module, MutationOp, NullOrder,
+    OperationId, OperationKind, OperationSpec, ProfileSiteId, RegionId, ScalarOp, Schema,
+    SortDirection, SortKey, SourceSpan, SqlType, TerminatorOp, Type, UpsertAssignment, ValueId,
+    VerificationLocation, Volatility, WalkOrder, WindowFrame, WindowFrameBound, WindowFrameUnit,
+    WindowSpec, collect_operations, structural_fingerprint, verify_module,
 };
 
 #[derive(Debug)]
@@ -606,6 +606,7 @@ fn verifier_restricts_aggregate_and_window_calls_to_their_regions() {
             ScalarOp::AggregateCall {
                 function: FunctionRef::new("sum"),
                 distinct: false,
+                star: false,
                 volatility: Volatility::Immutable,
                 effects: EffectSet::PURE,
             },
@@ -1020,4 +1021,129 @@ fn in_array_fingerprint_is_independent_of_bound_list_contents() {
     let first = structural_fingerprint(&build_membership_module(element.clone())).unwrap();
     let second = structural_fingerprint(&build_membership_module(element)).unwrap();
     assert_eq!(first, second);
+}
+
+fn insert_fingerprint_module(
+    update_on_conflict: bool,
+    malformed_returning: bool,
+    mismatched_conflict_types: bool,
+) -> Module {
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let text = Type::scalar(SqlType::Utf8, false);
+        let schema = editor.intern_schema(Schema::new(vec![
+            Field::new("id", i64_type()),
+            Field::new("name", text.clone()),
+        ]));
+        let target = ConflictTarget::Columns(vec!["id".into()]);
+        let conflict = if update_on_conflict {
+            ConflictClause::do_update(
+                target,
+                vec![UpsertAssignment::new(
+                    "name",
+                    if mismatched_conflict_types {
+                        "id"
+                    } else {
+                        "name"
+                    },
+                )],
+            )
+        } else {
+            ConflictClause::do_nothing(Some(target))
+        };
+        let insert = editor
+            .append_operation(
+                root,
+                OperationSpec::new(MutationOp::Insert {
+                    table: afterburner::ir::TableRef::new("users"),
+                    schema,
+                    columns: vec!["id".into(), "name".into()],
+                    rows: 1,
+                    conflict: Some(conflict),
+                    returning: if malformed_returning {
+                        vec!["id".into()]
+                    } else {
+                        Vec::new()
+                    },
+                })
+                .with_result(Type::Unit),
+            )
+            .unwrap();
+        let region = editor.add_region(insert).unwrap();
+        let block = editor.append_block(region, Vec::new()).unwrap();
+        let id = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::Parameter {
+                    position: 0,
+                    name: None,
+                })
+                .with_result(i64_type()),
+            )
+            .unwrap();
+        let name = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::Parameter {
+                    position: 1,
+                    name: None,
+                })
+                .with_result(text),
+            )
+            .unwrap();
+        let id = editor.result(id, 0).unwrap();
+        let name = editor.result(name, 0).unwrap();
+        editor
+            .append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![id, name]),
+            )
+            .unwrap();
+        let command = editor.result(insert, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::CommandReturn).with_operands(vec![command]),
+            )
+            .unwrap();
+    }
+    module
+}
+
+#[test]
+fn mutation_conflict_semantics_participate_in_fingerprints() {
+    let do_nothing = insert_fingerprint_module(false, false, false);
+    let do_update = insert_fingerprint_module(true, false, false);
+    verify_module(&do_nothing).expect("do-nothing insert verifies");
+    verify_module(&do_update).expect("upsert verifies");
+    assert_ne!(
+        structural_fingerprint(&do_nothing).unwrap(),
+        structural_fingerprint(&do_update).unwrap()
+    );
+}
+
+#[test]
+fn verifier_rejects_mutation_returning_contract_mismatches() {
+    let module = insert_fingerprint_module(false, true, false);
+    let insert = module.block(module.root_block()).unwrap().operations()[0];
+    let errors = verify_module(&module).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.location() == VerificationLocation::Operation(insert)
+            && error
+                .message()
+                .contains("result schema must match returning")
+    }));
+}
+
+#[test]
+fn verifier_rejects_mismatched_upsert_assignment_types() {
+    let module = insert_fingerprint_module(true, false, true);
+    let insert = module.block(module.root_block()).unwrap().operations()[0];
+    let errors = verify_module(&module).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.location() == VerificationLocation::Operation(insert)
+            && error.message().contains("must have the same type")
+    }));
 }

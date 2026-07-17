@@ -65,7 +65,7 @@ pub(crate) enum Predicate {
     /// Reference to one entity column by position in `Entity::COLUMNS`.
     Column(usize),
     /// Reference to one positional bind, with the typing of its operand.
-    Bind { position: u32, ty: OperandType },
+    Bind { position: usize, ty: OperandType },
     /// One unary scalar operation.
     Unary {
         op: UnaryOperator,
@@ -84,7 +84,7 @@ pub(crate) fn normalize(node: Node, binds: &mut Vec<Value>) -> Predicate {
     match node {
         Node::Column(index) => Predicate::Column(index),
         Node::Value { value, ty } => {
-            let position = binds.len() as u32;
+            let position = binds.len();
             binds.push(value);
             Predicate::Bind { position, ty }
         }

@@ -2,26 +2,29 @@
 //!
 //! This crate owns the runtime side of the pipeline: connection pooling,
 //! transactions, plan caching, parameter binding, and decoding driver rows
-//! back into entity models. The wire protocol is deliberately not
-//! reimplemented — [`sqlx`] provides the PostgreSQL driver, and JetORM's
-//! effort stays on the optimizer pipeline above it.
+//! into typed results. The wire protocol is deliberately not reimplemented —
+//! [`sqlx`] provides the PostgreSQL driver, and JetORM's effort stays on the
+//! optimizer pipeline above it.
 //!
 //! # Execution pipeline
 //!
-//! Running a [`jetorm_query::Select`] performs, in order:
+//! Running a typed read or mutation performs, in order:
 //!
-//! 1. **Lowering** — the typed builder lowers into AfterBurner IR and is
-//!    verified (`afterburner!`).
-//! 2. **Plan cache** — the module's structural fingerprint keys a cache of
-//!    rendered statements. Queries differing only in bound values share one
-//!    fingerprint, so SQL rendering (and, later, optimizer passes) run once
-//!    per query shape.
+//! 1. **Validation** — value-dependent safety rules run on every execution,
+//!    including cache hits.
+//! 2. **Plan lookup** — a value-independent query shape probes the shared
+//!    cache. A miss lowers the typed builder into verified AfterBurner IR and
+//!    renders SQL; a hit skips those stages entirely.
 //! 3. **Binding** — the statement's `bind_order` maps frontend bind-table
 //!    positions onto `$n` placeholders; values bind through their exact
 //!    PostgreSQL types.
-//! 4. **Decoding** — each row decodes positionally into
-//!    [`jetorm_entity::Value`]s using the entity's column metadata, then into
-//!    the user's model through [`jetorm_entity::Model::from_values`].
+//! 4. **Decoding** — row-producing statements decode positionally through
+//!    [`jetorm_entity::Value`]s. Depending on the builder, those values become
+//!    an entity model, a joined model pair, a projected column, or a scalar.
+//!
+//! Row-producing statements and affected-row commands use separate executor
+//! paths. The rendered statement carries that result contract, and a mismatch
+//! is rejected before the driver executes SQL.
 //!
 //! # Example
 //!
@@ -58,20 +61,24 @@
 mod database;
 mod error;
 mod join;
+mod mutation;
 mod paginate;
 mod plan;
 mod relations;
 mod row;
+mod scalar;
 mod select;
 mod value;
 
 pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::{ErrorKind, ExecuteError};
 pub use join::JoinExecute;
+pub use mutation::{MutationExecute, ReturningExecute};
 pub use paginate::{CursorExecute, PaginateExecute, Paginator};
 pub use plan::PlanCache;
 pub use relations::{load_many, load_one};
 pub use row::JetRow;
+pub use scalar::ExistsExecute;
 pub use select::{GroupedExecute, ProjectedExecute, SelectExecute};
 
 /// The `sqlx` version JetORM is built against.

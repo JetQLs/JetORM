@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    BlockId, FunctionRef, Literal, ProfileSiteId, RegionId, SourceSpan, TableRef, Type, ValueId,
-    Volatility,
+    BlockId, FunctionRef, Literal, MutationOp, ProfileSiteId, RegionId, SourceSpan, TableRef, Type,
+    ValueId, Volatility,
 };
 
 /// Deterministically encodable metadata attached to an operation.
@@ -447,6 +447,11 @@ pub enum LogicalOp {
     },
     /// Removes duplicate rows while preserving the relation type.
     Distinct,
+    /// Collapses a relation into one non-null Boolean indicating whether it has a row.
+    ///
+    /// The operation consumes one relation, produces a one-field Boolean
+    /// relation, and owns no nested region.
+    Exists,
     /// Applies a set operation to at least two identically typed relations.
     ///
     /// The single result has that same relation type and the operation owns no
@@ -560,6 +565,8 @@ pub enum ScalarOp {
         function: FunctionRef,
         /// Whether duplicate arguments are discarded.
         distinct: bool,
+        /// Whether the call consumes the SQL wildcard instead of value operands.
+        star: bool,
         /// Reordering and folding contract.
         volatility: Volatility,
         /// Effects not already implied by volatility.
@@ -587,6 +594,8 @@ pub enum TerminatorOp {
     Yield,
     /// Returns a relation from the module's root region.
     QueryReturn,
+    /// Returns a unit-valued command from the module's root region.
+    CommandReturn,
 }
 
 /// Escape hatch for downstream logical, physical, and runtime dialects.
@@ -658,6 +667,8 @@ impl ExtensionOp {
 pub enum OperationKind {
     /// Built-in logical relational operation.
     Logical(LogicalOp),
+    /// Built-in database mutation operation.
+    Mutation(MutationOp),
     /// Built-in scalar expression operation.
     Scalar(ScalarOp),
     /// Built-in region terminator.
@@ -675,6 +686,12 @@ impl From<LogicalOp> for OperationKind {
 impl From<ScalarOp> for OperationKind {
     fn from(value: ScalarOp) -> Self {
         Self::Scalar(value)
+    }
+}
+
+impl From<MutationOp> for OperationKind {
+    fn from(value: MutationOp) -> Self {
+        Self::Mutation(value)
     }
 }
 
@@ -697,7 +714,7 @@ impl OperationKind {
         match self {
             Self::Terminator(_) => true,
             Self::Extension(extension) => extension.is_terminator(),
-            Self::Logical(_) | Self::Scalar(_) => false,
+            Self::Logical(_) | Self::Mutation(_) | Self::Scalar(_) => false,
         }
     }
 
@@ -706,6 +723,7 @@ impl OperationKind {
     pub const fn effects(&self) -> EffectSet {
         match self {
             Self::Logical(LogicalOp::Scan { .. }) => EffectSet::READS_DATABASE,
+            Self::Mutation(_) => EffectSet::WRITES_DATABASE.union(EffectSet::MAY_ERROR),
             Self::Scalar(ScalarOp::Call {
                 volatility,
                 effects,

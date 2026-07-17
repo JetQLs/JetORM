@@ -233,9 +233,11 @@ rank = 1
 $ jet seed --dir seeds --schema schema.toml
 ```
 
-Rows are validated against the schema before anything executes, and
-the whole application is one transaction — a mistyped value rolls
-everything back with an error naming the file, table, row, and column.
+Rows are validated against the schema before anything executes — down
+to enum variants — and the whole application is one transaction: a
+mistyped value rolls everything back with an error naming the file,
+table, row, and column. The file governs exactly the columns it
+spells; a column a row omits keeps its database value.
 
 **Existing database?** Start from it:
 

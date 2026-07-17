@@ -162,9 +162,10 @@ impl<E: Entity> Insert<E> {
         ensure_bind_capacity(bind_count)?;
 
         match &self.conflict {
-            InsertConflict::None
-            | InsertConflict::DoNothing
-            | InsertConflict::TargetedIgnore { .. } => {}
+            InsertConflict::None | InsertConflict::DoNothing => {}
+            InsertConflict::TargetedIgnore { target } => {
+                self.validate_arbiter(target)?;
+            }
             InsertConflict::UpdateInserted => {
                 if E::PRIMARY_KEY.is_empty() {
                     return Err(LoweringError::MissingPrimaryKey);
@@ -186,6 +187,7 @@ impl<E: Entity> Insert<E> {
                 }
             }
             InsertConflict::TargetedUpdate { target, update } => {
+                self.validate_arbiter(target)?;
                 if update.is_empty() {
                     return Err(LoweringError::EmptyUpsertUpdate);
                 }
@@ -205,6 +207,31 @@ impl<E: Entity> Insert<E> {
                             column: column.name().to_owned(),
                         });
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects arbiters whose conflict arm could never fire.
+    fn validate_arbiter(&self, target: &[usize]) -> Result<(), LoweringError> {
+        for index in target {
+            let column = &E::COLUMNS[*index];
+            // A generated column is never among the inserted values, so
+            // its arbiter always receives a fresh sequence number.
+            if column.is_auto_increment() {
+                return Err(LoweringError::UpsertKeyGenerated {
+                    column: column.name().to_owned(),
+                });
+            }
+            // PostgreSQL's unique indexes treat NULLs as distinct, so a
+            // NULL arbiter value conflicts with nothing — the row would
+            // insert on every application instead of converging.
+            for values in &self.rows {
+                if values.get(*index).is_some_and(Value::is_null) {
+                    return Err(LoweringError::UpsertNullArbiter {
+                        column: column.name().to_owned(),
+                    });
                 }
             }
         }

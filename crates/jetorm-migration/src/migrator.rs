@@ -345,20 +345,21 @@ impl<'a> Migrator<'a> {
         .await?;
         transaction.commit().await?;
 
+        // Every deferred validation runs even when an earlier one fails:
+        // stopping early would leave later constraints unvalidated behind
+        // an error that names only the first, and the operator's repair
+        // pass deserves the full list.
+        let mut failures = Vec::new();
         for statement in &deferred {
-            sqlx::query(statement)
-                .execute(self.database.pool())
-                .await
-                .map_err(|error| MigrationError::InvalidVersion {
-                    version: migration.version().to_owned(),
-                    detail: format!(
-                        "the migration is recorded and the constraint holds for \
-                         new writes, but existing rows failed validation \
-                         ({error}); repair the data and rerun: {statement}"
-                    ),
-                })?;
+            if let Err(error) = sqlx::query(statement).execute(self.database.pool()).await {
+                failures.push((statement.clone(), error.to_string()));
+            }
         }
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(MigrationError::Validation { failures })
+        }
     }
 
     /// Applies pending migrations with constraint validation staged.
@@ -376,6 +377,47 @@ impl<'a> Migrator<'a> {
         versions: &[String],
     ) -> Result<Vec<String>, MigrationError> {
         let pending = self.pending().await?;
+        // A rename or raw-SQL step after a staged constraint could change
+        // the very names the deferred validation addresses; refusing is
+        // honest where reordering would guess.
+        for migration in &pending {
+            let mut staged_constraint_seen = false;
+            for step in migration.up() {
+                match step {
+                    MigrationStep::Change(change) => {
+                        if matches!(change, jetorm_schema::SchemaChange::AddForeignKey { .. }) {
+                            staged_constraint_seen = true;
+                        } else if staged_constraint_seen
+                            && matches!(
+                                change,
+                                jetorm_schema::SchemaChange::RenameTable { .. }
+                                    | jetorm_schema::SchemaChange::RenameColumn { .. }
+                                    | jetorm_schema::SchemaChange::DropTable(_)
+                            )
+                        {
+                            return Err(MigrationError::InvalidVersion {
+                                version: migration.version().to_owned(),
+                                detail: "a rename or drop follows a staged \
+                                         constraint; apply this migration \
+                                         without --stage-constraints"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                    MigrationStep::Sql { .. } if staged_constraint_seen => {
+                        return Err(MigrationError::InvalidVersion {
+                            version: migration.version().to_owned(),
+                            detail: "a raw SQL step follows a staged constraint \
+                                     and could rename what the deferred \
+                                     validation addresses; apply this migration \
+                                     without --stage-constraints"
+                                .to_owned(),
+                        });
+                    }
+                    MigrationStep::Sql { .. } => {}
+                }
+            }
+        }
         if pending.len() < versions.len() {
             return Err(MigrationError::InvalidVersion {
                 version: versions[pending.len().min(versions.len() - 1)].clone(),
@@ -415,12 +457,15 @@ impl<'a> Migrator<'a> {
         &self,
         schema_name: &str,
     ) -> Result<Vec<String>, MigrationError> {
+        // Foreign keys only: staging creates nothing else, and a user's
+        // own deliberately-unvalidated CHECK is a pattern this tool must
+        // not silently flip.
         let rows = sqlx::query(
             "SELECT n.nspname, t.relname, c.conname
              FROM pg_constraint c
              JOIN pg_class t ON t.oid = c.conrelid
              JOIN pg_namespace n ON n.oid = t.relnamespace
-             WHERE n.nspname = $1 AND NOT c.convalidated
+             WHERE n.nspname = $1 AND NOT c.convalidated AND c.contype = 'f'
              ORDER BY t.relname, c.conname",
         )
         .bind(schema_name)
@@ -428,21 +473,26 @@ impl<'a> Migrator<'a> {
         .await?;
 
         let mut validated = Vec::with_capacity(rows.len());
+        let mut failures = Vec::new();
         for row in rows {
             let (schema, table, constraint): (String, String, String) =
                 (row.get(0), row.get(1), row.get(2));
-            sqlx::query(&format!(
-                "ALTER TABLE \"{schema}\".\"{table}\" VALIDATE CONSTRAINT \"{constraint}\""
-            ))
-            .execute(self.database.pool())
-            .await
-            .map_err(|error| MigrationError::InvalidVersion {
-                version: constraint.clone(),
-                detail: format!("existing rows violate the constraint: {error}"),
-            })?;
-            validated.push(format!("{table}.{constraint}"));
+            let statement = format!(
+                "ALTER TABLE {}.{} VALIDATE CONSTRAINT {}",
+                quote_identifier(&schema),
+                quote_identifier(&table),
+                quote_identifier(&constraint),
+            );
+            match sqlx::query(&statement).execute(self.database.pool()).await {
+                Ok(_) => validated.push(format!("{table}.{constraint}")),
+                Err(error) => failures.push((format!("{table}.{constraint}"), error.to_string())),
+            }
         }
-        Ok(validated)
+        if failures.is_empty() {
+            Ok(validated)
+        } else {
+            Err(MigrationError::Validation { failures })
+        }
     }
 
     /// Runs one migration's down steps and forgets it, in one transaction.
@@ -466,6 +516,15 @@ impl<'a> Migrator<'a> {
 }
 
 /// Renders every step of one migration into executable statements.
+/// Quotes one identifier read from the catalog, doubling embedded quotes.
+///
+/// Catalog names are legal PostgreSQL identifiers, which may contain
+/// double quotes; interpolating them raw would produce broken — or worse,
+/// injectable — statements.
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 fn render_steps(version: &str, steps: &[MigrationStep]) -> Result<Vec<String>, MigrationError> {
     let mut statements = Vec::with_capacity(steps.len());
     for step in steps {

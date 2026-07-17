@@ -635,6 +635,7 @@ fn append_left_join<R>(
     left_fields: &[Field],
     left_types: &[Type],
     source_key_position: usize,
+    alias_prefix: &str,
 ) -> Result<(ValueId, Type, Vec<Field>, Vec<Type>), LoweringError>
 where
     R: Relation,
@@ -644,7 +645,7 @@ where
     let mut fields: Vec<Field> = left_fields.to_vec();
     for column in R::Target::COLUMNS {
         fields.push(Field::new(
-            format!("{}__{}", R::NAME, column.name()),
+            format!("{alias_prefix}__{}", column.name()),
             Type::Scalar(column_scalar_type(column).with_nullability(true)),
         ));
     }
@@ -723,6 +724,14 @@ where
             .map(|column| Field::new(column.name(), Type::Scalar(column_scalar_type(column))))
             .collect();
 
+        // Both edges of a forward-and-inverse pair share one relation
+        // name, and nothing stops the same edge twice; the second prefix
+        // disambiguates so the joined schema never repeats a field name.
+        let second_prefix = if R1::NAME == R2::NAME {
+            format!("{}_2", R2::NAME)
+        } else {
+            R2::NAME.to_owned()
+        };
         let (joined1, _, fields1, types1) = append_left_join::<R1>(
             &mut editor,
             root,
@@ -730,6 +739,7 @@ where
             &source_fields,
             &source_types,
             <R1::SourceColumn as Column>::INDEX,
+            R1::NAME,
         )?;
         let (joined2, joined_type, _, joined_types) = append_left_join::<R2>(
             &mut editor,
@@ -738,6 +748,7 @@ where
             &fields1,
             &types1,
             <R2::SourceColumn as Column>::INDEX,
+            &second_prefix,
         )?;
 
         let source_width = R1::Source::COLUMNS.len();
@@ -757,8 +768,8 @@ where
             let block = editor.append_block(region, joined_types.clone())?;
             let mut condition: Option<(ValueId, ScalarType)> = None;
             let add = |editor: &mut IrEditor<'_>,
-                           condition: &mut Option<(ValueId, ScalarType)>,
-                           part: (ValueId, ScalarType)|
+                       condition: &mut Option<(ValueId, ScalarType)>,
+                       part: (ValueId, ScalarType)|
              -> Result<(), LoweringError> {
                 *condition = Some(match condition.take() {
                     None => part,

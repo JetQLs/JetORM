@@ -1,4 +1,4 @@
-use jetorm_entity::{Column, Entity};
+use jetorm_entity::{Entity, NonNullColumn};
 
 use crate::expr::{ColumnExt, Expr, OrderKey};
 use crate::select::Select;
@@ -45,7 +45,7 @@ where
 impl<E, A> CursorKey<E> for (A,)
 where
     E: Entity,
-    A: Column<Entity = E> + Copy,
+    A: NonNullColumn<Entity = E> + Copy,
     A::Rust: Clone,
 {
     type Key = A::Rust;
@@ -72,7 +72,7 @@ macro_rules! impl_cursor_key_for_tuple {
         impl<E, $($column),+> CursorKey<E> for ($($column,)+)
         where
             E: Entity,
-            $($column: Column<Entity = E> + Copy, $column::Rust: Clone,)+
+            $($column: NonNullColumn<Entity = E> + Copy, $column::Rust: Clone,)+
         {
             type Key = ($($column::Rust,)+);
 

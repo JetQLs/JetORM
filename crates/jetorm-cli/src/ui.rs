@@ -73,6 +73,8 @@ pub struct Ui {
     pub selected: usize,
     /// Drift between migration files and the target schema, when given.
     pub drift: Vec<String>,
+    /// Whether any drift change can lose data or fail on populated tables.
+    pub drift_destructive: bool,
     /// Unconfirmed rename candidates of the current drift.
     pub candidates: Vec<RenameCandidate>,
     /// Current interaction mode.
@@ -116,12 +118,14 @@ impl Ui {
     pub fn new(
         rows: Vec<MigrationRow>,
         drift: Vec<String>,
+        drift_destructive: bool,
         candidates: Vec<RenameCandidate>,
     ) -> Self {
         Self {
             rows,
             selected: 0,
             drift,
+            drift_destructive,
             candidates,
             mode: Mode::Browse,
             quit: false,
@@ -187,10 +191,9 @@ impl Ui {
                 }
                 self.mode = Mode::ConfirmGenerate {
                     changes: self.drift.clone(),
-                    destructive: self
-                        .drift
-                        .iter()
-                        .any(|change| change.starts_with("drop") || change.starts_with("alter")),
+                    // The real classification, not a string sniff: the
+                    // schema layer already knows which changes bite.
+                    destructive: self.drift_destructive,
                 };
                 Effect::None
             }
@@ -246,6 +249,7 @@ impl Ui {
 struct Snapshot {
     rows: Vec<MigrationRow>,
     drift: Vec<String>,
+    drift_destructive: bool,
     candidates: Vec<RenameCandidate>,
     /// The live diff object renames rewrite; kept so confirmations apply.
     diff: Option<SchemaDiff>,
@@ -281,21 +285,23 @@ async fn load(
         })
         .collect();
 
-    let (drift, candidates, live_diff) = match schema {
+    let (drift, drift_destructive, candidates, live_diff) = match schema {
         Some(target) => {
             let replayed = migrations.replay().map_err(|error| error.to_string())?;
             let changes = diff(&replayed, target);
             (
                 changes.changes().iter().map(ToString::to_string).collect(),
+                changes.has_destructive_changes(),
                 changes.rename_candidates().to_vec(),
                 Some(changes),
             )
         }
-        None => (Vec::new(), Vec::new(), None),
+        None => (Vec::new(), false, Vec::new(), None),
     };
     Ok(Snapshot {
         rows,
         drift,
+        drift_destructive,
         candidates,
         diff: live_diff,
     })
@@ -316,6 +322,7 @@ pub async fn run(
     let mut ui = Ui::new(
         snapshot.rows.clone(),
         snapshot.drift.clone(),
+        snapshot.drift_destructive,
         snapshot.candidates.clone(),
     );
 
@@ -344,6 +351,7 @@ pub async fn run(
                 ui = Ui::new(
                     snapshot.rows.clone(),
                     snapshot.drift.clone(),
+                    snapshot.drift_destructive,
                     snapshot.candidates.clone(),
                 );
                 ui.mode = Mode::Notice(notice);
@@ -354,6 +362,7 @@ pub async fn run(
                 // track the snapshot the effect may have rewritten.
                 ui.rows = snapshot.rows.clone();
                 ui.drift = snapshot.drift.clone();
+                ui.drift_destructive = snapshot.drift_destructive;
                 ui.candidates = snapshot.candidates.clone();
                 ui.selected = ui.selected.min(ui.rows.len().saturating_sub(1));
             }
@@ -366,6 +375,7 @@ pub async fn run(
                     ui = Ui::new(
                         snapshot.rows.clone(),
                         snapshot.drift.clone(),
+                        snapshot.drift_destructive,
                         snapshot.candidates.clone(),
                     );
                 }
@@ -406,6 +416,22 @@ async fn run_effect(
             let Some(live) = snapshot.diff.as_ref() else {
                 return Ok(None);
             };
+            // The dashboard may have sat open while migrations changed on
+            // disk; writing the reviewed plan against a moved baseline
+            // would misapply. Recompute and compare before writing.
+            let fresh = load(database, dir, schema).await?;
+            let unchanged = fresh.rows == snapshot.rows
+                && fresh
+                    .diff
+                    .as_ref()
+                    .map(|diff| diff.changes() == live.changes())
+                    .unwrap_or(false);
+            if !unchanged {
+                *snapshot = fresh;
+                return Ok(Some(
+                    "the plan changed since it was reviewed; review again".to_owned(),
+                ));
+            }
             let migrations =
                 MigrationSet::from_directory(dir).map_err(|error| error.to_string())?;
             let version = crate::next_version(&migrations, "reviewed");
@@ -593,7 +619,7 @@ mod tests {
 
     #[test]
     fn applying_asks_first_and_names_destructive_steps() {
-        let mut ui = Ui::new(rows(), Vec::new(), Vec::new());
+        let mut ui = Ui::new(rows(), Vec::new(), false, Vec::new());
         assert_eq!(ui.apply_action(Action::StartApply), Effect::None);
         assert_eq!(
             ui.mode,
@@ -612,7 +638,7 @@ mod tests {
 
     #[test]
     fn cancelling_a_confirmation_changes_nothing() {
-        let mut ui = Ui::new(rows(), Vec::new(), Vec::new());
+        let mut ui = Ui::new(rows(), Vec::new(), false, Vec::new());
         ui.apply_action(Action::StartApply);
         assert_eq!(ui.apply_action(Action::Cancel), Effect::None);
         assert_eq!(ui.mode, Mode::Browse);
@@ -632,7 +658,7 @@ mod tests {
                 to: "headline".to_owned(),
             },
         ];
-        let mut ui = Ui::new(rows(), Vec::new(), candidates.clone());
+        let mut ui = Ui::new(rows(), Vec::new(), false, candidates.clone());
         ui.apply_action(Action::StartRenameReview);
 
         // Declining the first moves on without an effect.
@@ -647,7 +673,7 @@ mod tests {
 
     #[test]
     fn generating_requires_a_reviewed_plan() {
-        let mut ui = Ui::new(rows(), vec!["create table t".to_owned()], Vec::new());
+        let mut ui = Ui::new(rows(), vec!["create table t".to_owned()], false, Vec::new());
         ui.apply_action(Action::StartGenerate);
         assert!(matches!(ui.mode, Mode::ConfirmGenerate { .. }));
         assert_eq!(ui.apply_action(Action::Confirm), Effect::Generate);
@@ -659,6 +685,7 @@ mod tests {
         let mut ui = Ui::new(
             rows(),
             vec!["drop table users".to_owned()],
+            true,
             vec![RenameCandidate::Table {
                 from: TableName::new("users"),
                 to: TableName::new("accounts"),
@@ -670,7 +697,7 @@ mod tests {
 
     #[test]
     fn selection_stays_in_bounds() {
-        let mut ui = Ui::new(rows(), Vec::new(), Vec::new());
+        let mut ui = Ui::new(rows(), Vec::new(), false, Vec::new());
         ui.apply_action(Action::Up);
         assert_eq!(ui.selected, 0);
         ui.apply_action(Action::Down);

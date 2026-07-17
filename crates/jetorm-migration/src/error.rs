@@ -51,6 +51,11 @@ pub enum MigrationError {
     },
     /// The database rejected a statement or was unreachable.
     Database(ExecuteError),
+    /// One or more constraints failed validation against existing rows.
+    Validation {
+        /// Each failed constraint with what the database said.
+        failures: Vec<(String, String)>,
+    },
     /// A migration file could not be read or parsed.
     File {
         /// Path that failed.
@@ -85,6 +90,19 @@ impl fmt::Display for MigrationError {
                 write!(formatter, "migration {version:?} cannot render: {source}")
             }
             Self::Database(error) => write!(formatter, "{error}"),
+            Self::Validation { failures } => {
+                write!(formatter, "existing rows violate: ")?;
+                for (index, (constraint, detail)) in failures.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str("; ")?;
+                    }
+                    write!(formatter, "{constraint} ({detail})")?;
+                }
+                write!(
+                    formatter,
+                    "; repair the data, then run `jet migrate validate`"
+                )
+            }
             Self::File { path, detail } => write!(formatter, "{path}: {detail}"),
         }
     }
@@ -99,6 +117,7 @@ impl Error for MigrationError {
             Self::DuplicateVersion { .. }
             | Self::InvalidVersion { .. }
             | Self::UnknownAppliedVersion { .. }
+            | Self::Validation { .. }
             | Self::File { .. } => None,
         }
     }

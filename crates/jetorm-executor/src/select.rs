@@ -5,7 +5,6 @@ use jetorm_query::Select;
 
 use crate::database::Executor;
 use crate::error::ExecuteError;
-use crate::value::decode_row;
 
 /// Execution entry points for typed select queries.
 ///
@@ -42,13 +41,14 @@ where
         X: Executor,
     {
         let statement = executor.plan_cache().statement(&self)?;
-        let rows = executor.fetch_rows(statement, self.into_binds()).await?;
+        let rows = executor
+            .fetch_rows(statement, self.into_binds(), E::COLUMNS)
+            .await?;
 
         let mut models = Vec::with_capacity(rows.len());
-        for (index, row) in rows.iter().enumerate() {
-            let values = decode_row(row, E::COLUMNS)?;
+        for (index, row) in rows.into_iter().enumerate() {
             models.push(
-                E::Model::from_values(values)
+                E::Model::from_values(row.into_values())
                     .map_err(|source| ExecuteError::Decode { row: index, source })?,
             );
         }

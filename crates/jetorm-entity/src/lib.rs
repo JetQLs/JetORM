@@ -28,7 +28,7 @@ mod error;
 mod meta;
 mod value;
 
-pub use entity::{Column, Entity, Model};
+pub use entity::{Column, Entity, Model, SingleKeyEntity};
 pub use error::{DecodeError, ValueTypeMismatch};
 pub use meta::{ColumnMeta, ColumnType, TableMeta};
 pub use value::{SqlValue, Value};

@@ -57,12 +57,14 @@
 mod database;
 mod error;
 mod plan;
+mod row;
 mod select;
 mod value;
 
 pub use database::{Database, DatabaseOptions, Executor, Transaction};
-pub use error::ExecuteError;
+pub use error::{ErrorKind, ExecuteError};
 pub use plan::PlanCache;
+pub use row::JetRow;
 pub use select::SelectExecute;
 
 /// The `sqlx` version JetORM is built against.

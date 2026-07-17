@@ -283,6 +283,16 @@ pub trait ColumnExt: Column + Sized {
         null_test::<Self>(UnaryOperator::IsNotNull)
     }
 
+    /// Builds an inclusive range predicate: `low <= column <= high`.
+    #[must_use]
+    fn between(
+        self,
+        low: impl Into<Self::Rust>,
+        high: impl Into<Self::Rust>,
+    ) -> Expr<Self::Entity, bool> {
+        self.ge(low).and(self.le(high))
+    }
+
     /// Orders by this column with the lowest value first.
     #[must_use]
     fn asc(self) -> OrderKey<Self::Entity> {
@@ -299,6 +309,12 @@ pub trait ColumnExt: Column + Sized {
 impl<C> ColumnExt for C where C: Column {}
 
 /// Pattern operators available on text columns only.
+///
+/// [`TextColumnExt::like`] and [`TextColumnExt::ilike`] treat the argument
+/// as a pattern the caller controls. The substring operators treat it as
+/// literal text: `%`, `_`, and `\` in the needle are escaped, so matching a
+/// discount string like `"50%"` matches those three characters rather than
+/// turning user input into a wildcard.
 pub trait TextColumnExt: Column<Rust = String> + Sized {
     /// Builds a SQL `LIKE` pattern predicate.
     #[must_use]
@@ -311,9 +327,51 @@ pub trait TextColumnExt: Column<Rust = String> + Sized {
     fn ilike(self, pattern: impl Into<String>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::CaseInsensitiveLike, pattern.into())
     }
+
+    /// Matches values containing the needle as literal text.
+    #[must_use]
+    fn contains(self, needle: impl AsRef<str>) -> Expr<Self::Entity, bool> {
+        compare::<Self>(
+            BinaryOperator::Like,
+            format!("%{}%", escape_like(needle.as_ref())),
+        )
+    }
+
+    /// Matches values starting with the prefix as literal text.
+    #[must_use]
+    fn starts_with(self, prefix: impl AsRef<str>) -> Expr<Self::Entity, bool> {
+        compare::<Self>(
+            BinaryOperator::Like,
+            format!("{}%", escape_like(prefix.as_ref())),
+        )
+    }
+
+    /// Matches values ending with the suffix as literal text.
+    #[must_use]
+    fn ends_with(self, suffix: impl AsRef<str>) -> Expr<Self::Entity, bool> {
+        compare::<Self>(
+            BinaryOperator::Like,
+            format!("%{}", escape_like(suffix.as_ref())),
+        )
+    }
 }
 
 impl<C> TextColumnExt for C where C: Column<Rust = String> {}
+
+/// Escapes `LIKE` metacharacters so a needle matches itself literally.
+///
+/// PostgreSQL's default `LIKE` escape character is the backslash, so the
+/// escaped needle needs no `ESCAPE` clause.
+fn escape_like(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len());
+    for character in needle.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
 
 fn compare<C>(op: BinaryOperator, value: C::Rust) -> Expr<C::Entity, bool>
 where

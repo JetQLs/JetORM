@@ -43,6 +43,17 @@ pub trait Model: Sized {
     fn from_values(values: Vec<Value>) -> Result<Self, DecodeError>;
 }
 
+/// Entities whose primary key is exactly one column.
+///
+/// `#[derive(JetModel)]` implements this automatically for single-column
+/// keys; composite-key entities do not implement it and therefore have no
+/// by-id lookup until composite key support lands. The marker's `Default`
+/// bound lets generic code conjure the column to build predicates.
+pub trait SingleKeyEntity: Entity {
+    /// Marker of the primary-key column.
+    type PrimaryKeyColumn: Column<Entity = Self> + Default;
+}
+
 /// Zero-sized marker for one entity column.
 ///
 /// The marker carries the column's Rust type, so expression builders accept

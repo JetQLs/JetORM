@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock};
 use std::{fmt, marker::PhantomData};
 
 use afterburner::ir::BinaryOperator;
-use jetorm_entity::{Entity, Value};
+use jetorm_entity::{Column, Entity, SingleKeyEntity, Value};
 
 use crate::expr::{Expr, OrderKey, Predicate, SortKeySpec, normalize};
 
@@ -262,6 +262,20 @@ pub trait EntityQuery: Entity {
     #[must_use]
     fn find() -> Select<Self> {
         Select::new()
+    }
+
+    /// Starts a select for the row whose primary key equals the value.
+    ///
+    /// Available on entities with a single-column primary key. The value
+    /// converts into the key column's Rust type, so a mismatched type is a
+    /// compile error, and it binds as a parameter like every other value.
+    #[must_use]
+    fn find_by_id(value: impl Into<<Self::PrimaryKeyColumn as Column>::Rust>) -> Select<Self>
+    where
+        Self: SingleKeyEntity,
+    {
+        use crate::expr::ColumnExt;
+        Self::find().filter(Self::PrimaryKeyColumn::default().eq(value))
     }
 }
 

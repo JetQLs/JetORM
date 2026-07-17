@@ -576,3 +576,32 @@ async fn advanced_codegen_executes_on_postgres() {
 
     db.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn constraint_failures_classify_without_driver_coupling() {
+    let (_container, db) = fresh_database().await;
+    create_fixture(&db).await;
+
+    // Duplicate primary key: the classification must identify it without
+    // the caller parsing SQLSTATE codes or matching sqlx types.
+    let error = jetorm_executor::ExecuteError::from(
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE} (id, name, email) VALUES (1, 'dup', NULL)"
+        ))
+        .execute(db.pool())
+        .await
+        .expect_err("duplicate key must be rejected"),
+    );
+    assert_eq!(error.kind(), jetorm_executor::ErrorKind::UniqueViolation);
+
+    let error = jetorm_executor::ExecuteError::from(
+        sqlx::query(&format!("INSERT INTO {TABLE} (id, name) VALUES (9, NULL)"))
+            .execute(db.pool())
+            .await
+            .expect_err("null name must be rejected"),
+    );
+    assert_eq!(error.kind(), jetorm_executor::ErrorKind::NotNullViolation);
+
+    db.close().await;
+}

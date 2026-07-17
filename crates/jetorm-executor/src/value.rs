@@ -71,12 +71,12 @@ fn bind_null(query: PgQuery<'_>, column_type: ColumnType) -> PgQuery<'_> {
 pub(crate) fn decode_row(
     row: &PgRow,
     columns: &'static [ColumnMeta],
-) -> Result<Vec<Value>, ExecuteError> {
+) -> Result<crate::row::JetRow, ExecuteError> {
     let mut values = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
         values.push(decode_column(row, index, column.column_type())?);
     }
-    Ok(values)
+    Ok(crate::row::JetRow::new(values))
 }
 
 fn decode_column(

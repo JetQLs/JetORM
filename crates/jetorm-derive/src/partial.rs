@@ -70,12 +70,10 @@ fn parse_field_marker(field: &syn::Field) -> syn::Result<Option<syn::Ident>> {
     let mut marker = None;
     for attribute in attrs::jet_attributes(&field.attrs) {
         attribute.parse_nested_meta(|meta| {
-            let literal;
-            if meta.path.is_ident("column") {
-                literal = meta.value()?.parse::<LitStr>()?;
-            } else {
+            if !meta.path.is_ident("column") {
                 return Err(meta.error("unknown field attribute; expected `column`"));
             }
+            let literal = meta.value()?.parse::<LitStr>()?;
             let name = literal.value();
             if name.is_empty()
                 || !name

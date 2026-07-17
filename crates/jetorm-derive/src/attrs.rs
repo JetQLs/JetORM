@@ -143,7 +143,7 @@ fn parse_referential_action(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Resul
     Ok(syn::Ident::new(variant, literal.span()))
 }
 
-fn jet_attributes(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
+pub(crate) fn jet_attributes(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
     attrs
         .iter()
         .filter(|attribute| attribute.path().is_ident("jet"))

@@ -1509,6 +1509,9 @@ dependencies = [
  "jetorm-executor",
  "jetorm-query",
  "serde_json",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
  "uuid",
 ]
 

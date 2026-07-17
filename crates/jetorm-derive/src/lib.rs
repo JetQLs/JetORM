@@ -41,6 +41,7 @@
 
 mod attrs;
 mod expand;
+mod partial;
 mod types;
 
 use proc_macro::TokenStream;
@@ -54,6 +55,35 @@ use syn::{DeriveInput, parse_macro_input};
 pub fn derive_jet_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives a partial model decoding a projection of one entity.
+///
+/// The struct holds a subset of the entity's columns; each field maps to
+/// the column marker with the field's PascalCase name inside the module
+/// named by `#[jet(columns = "...")]`, overridable per field with
+/// `#[jet(column = "Marker")]`. Field types must match the columns' field
+/// types exactly — `Option` for nullable columns — checked at compile time.
+///
+/// ```ignore
+/// #[derive(JetPartial)]
+/// #[jet(columns = "user")]
+/// pub struct UserSummary {
+///     pub id: i64,
+///     pub name: String,
+/// }
+///
+/// let rows: Vec<UserSummary> = UserEntity::find()
+///     .select_as::<UserSummary>()
+///     .all(&db)
+///     .await?;
+/// ```
+#[proc_macro_derive(JetPartial, attributes(jet))]
+pub fn derive_jet_partial(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    partial::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

@@ -9,11 +9,17 @@ use crate::select::{QueryShape, Select};
 ///
 /// Implemented by tuples of column markers up to eight columns — a single
 /// column is the 1-tuple `(user::Id,)`, which decodes to its field type
-/// rather than a 1-tuple. The list fixes both the projected positions and
-/// the Rust row type they decode into, so a projected query is as statically
-/// typed as a full-model query: a nullable column comes back as an `Option`,
-/// and a wrong tuple arity or element type is a compile error.
-pub trait ColumnList<E>: Copy
+/// rather than a 1-tuple — and by partial-model structs through
+/// `#[derive(JetPartial)]`, which decode to themselves. The list fixes both
+/// the projected positions and the Rust row type they decode into, so a
+/// projected query is as statically typed as a full-model query: a nullable
+/// column comes back as an `Option`, and a wrong tuple arity or element
+/// type is a compile error.
+///
+/// Everything is associated rather than instance-based: a projection is a
+/// fact about a type, and row types like partial models have no value in
+/// hand when the query is built.
+pub trait ColumnList<E>
 where
     E: Entity,
 {
@@ -21,7 +27,7 @@ where
     type Row;
 
     /// Column positions within `E::COLUMNS`, in output order.
-    fn indexes(&self) -> Vec<usize>;
+    fn indexes() -> Vec<usize>;
 
     /// Decodes one row of projected values.
     ///
@@ -40,7 +46,7 @@ where
 {
     type Row = A::Field;
 
-    fn indexes(&self) -> Vec<usize> {
+    fn indexes() -> Vec<usize> {
         vec![A::INDEX]
     }
 
@@ -68,7 +74,7 @@ macro_rules! impl_column_list_for_tuple {
         {
             type Row = ($($column::Field,)+);
 
-            fn indexes(&self) -> Vec<usize> {
+            fn indexes() -> Vec<usize> {
                 vec![$($column::INDEX),+]
             }
 
@@ -128,11 +134,27 @@ where
     /// type, a tuple of columns yields a tuple. Combining a projection with
     /// [`Select::distinct`] is not supported yet and fails at lowering.
     #[must_use]
-    pub fn select<C>(mut self, columns: C) -> Projected<E, C>
+    pub fn select<C>(self, columns: C) -> Projected<E, C>
     where
         C: ColumnList<E>,
     {
-        self.projection = Some(columns.indexes());
+        // The value exists purely so tuple projections infer their type
+        // from the argument; the projection itself is a fact about `C`.
+        let _ = columns;
+        self.select_as::<C>()
+    }
+
+    /// Restricts the fetched columns to a projection named by type.
+    ///
+    /// This is how partial models select themselves:
+    /// `query.select_as::<UserSummary>()` fetches exactly the columns the
+    /// partial declares and decodes each row into it.
+    #[must_use]
+    pub fn select_as<C>(mut self) -> Projected<E, C>
+    where
+        C: ColumnList<E>,
+    {
+        self.projection = Some(C::indexes());
         Projected {
             select: self,
             columns: PhantomData,

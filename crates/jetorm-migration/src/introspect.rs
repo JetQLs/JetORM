@@ -112,6 +112,32 @@ pub async fn introspect(
     let mut skipped = Vec::new();
     let mut notes = Vec::new();
 
+    // Native enum types first: the columns below resolve their names
+    // against this set, and a pulled schema must carry the definitions
+    // for its diff to create the types before any column takes them.
+    let enum_rows = sqlx::query(
+        "SELECT t.typname, e.enumlabel
+         FROM pg_type t
+         JOIN pg_namespace n ON n.oid = t.typnamespace
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE n.nspname = $1 AND t.typtype = 'e'
+         ORDER BY t.typname, e.enumsortorder",
+    )
+    .bind(schema_name)
+    .fetch_all(database.pool())
+    .await?;
+    let mut enum_variants: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for row in enum_rows {
+        enum_variants
+            .entry(row.get(0))
+            .or_default()
+            .push(row.get(1));
+    }
+    for (name, variants) in &enum_variants {
+        schema.insert_enum(name, variants.clone());
+    }
+
     let tables = sqlx::query(
         "SELECT table_name FROM information_schema.tables
          WHERE table_schema = $1 AND table_type = 'BASE TABLE'
@@ -142,15 +168,28 @@ pub async fn introspect(
         for column_row in columns {
             let column_name: String = column_row.get(0);
             let udt_name: String = column_row.get(1);
-            let Some(column_type) = column_type_of(&udt_name) else {
-                skipped.push(SkippedColumn {
-                    table: table_name.clone(),
-                    column: column_name,
-                    data_type: udt_name,
-                });
-                continue;
+            // An enum-typed column is text-backed in the model, carrying
+            // the type's name; arrays of enums have no Rust field type
+            // yet and skip like any unmapped column.
+            let enum_name = enum_variants
+                .contains_key(&udt_name)
+                .then(|| udt_name.clone());
+            let column_type = match (&enum_name, column_type_of(&udt_name)) {
+                (Some(_), _) => ColumnType::Text,
+                (None, Some(column_type)) => column_type,
+                (None, None) => {
+                    skipped.push(SkippedColumn {
+                        table: table_name.clone(),
+                        column: column_name,
+                        data_type: udt_name,
+                    });
+                    continue;
+                }
             };
             let mut definition = ColumnDef::new(&column_name, column_type);
+            if let Some(enum_name) = enum_name {
+                definition = definition.with_type_name(enum_name);
+            }
             let is_nullable: String = column_row.get(2);
             if is_nullable == "YES" {
                 definition = definition.nullable();

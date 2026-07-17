@@ -643,7 +643,7 @@ where
     /// The builder receives one typed reference per aggregate, in tuple
     /// order, each comparing at the aggregate's own promoted type:
     ///
-    /// ```ignore
+    /// ```text
     /// .select_agg((count_rows(), sum(order::Quantity)))
     /// .having(|(rows, total)| rows.ge(2).and(total.gt(10)))
     /// ```

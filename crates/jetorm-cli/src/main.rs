@@ -204,8 +204,15 @@ async fn up(args: UpArgs) -> Result<ExitCode, String> {
         return Ok(ExitCode::FAILURE);
     }
 
+    // Applying exactly the vetted plan closes the review-to-apply gap:
+    // if another process changes the pending set in between, this fails
+    // instead of applying something never vetted.
+    let plan: Vec<String> = planned
+        .iter()
+        .map(|migration| migration.version().to_owned())
+        .collect();
     let applied = migrator
-        .up(args.count)
+        .up_versions(&plan)
         .await
         .map_err(|error| error.to_string())?;
     for version in &applied {
@@ -316,6 +323,12 @@ fn generate(args: &GenerateArgs) -> Result<ExitCode, String> {
     let migration = Migration::new(version.clone(), up, Vec::new());
     let contents = migration.to_toml().map_err(|error| error.to_string())?;
     let path = args.dir.join(format!("{version}.toml"));
+    if path.exists() {
+        return Err(format!(
+            "{} already exists; refusing to overwrite a migration",
+            path.display()
+        ));
+    }
     std::fs::write(&path, contents)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     println!(
@@ -375,8 +388,26 @@ fn load_schema(path: &Path) -> Result<SchemaSet, String> {
 
 /// Builds the next version identifier: a zero-padded ordinal followed by
 /// the given name, which sorts after every existing version.
+///
+/// The ordinal is one past the highest existing ordinal — not the file
+/// count — so deleted or squashed migrations leave gaps rather than
+/// causing a later generate to reuse (and mis-sort against) an applied
+/// version.
 fn next_version(migrations: &MigrationSet, name: &str) -> String {
-    let next = migrations.len() + 1;
+    let highest = migrations
+        .migrations()
+        .iter()
+        .filter_map(|migration| {
+            let digits: String = migration
+                .version()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<u64>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let next = highest + 1;
     let slug: String = name
         .chars()
         .map(|character| {
@@ -388,4 +419,38 @@ fn next_version(migrations: &MigrationSet, name: &str) -> String {
         })
         .collect();
     format!("{next:04}_{slug}")
+}
+
+#[cfg(test)]
+mod tests {
+    use jetorm_migration::{Migration, MigrationSet};
+
+    use super::next_version;
+
+    fn set_of(versions: &[&str]) -> MigrationSet {
+        MigrationSet::new(
+            versions
+                .iter()
+                .map(|version| Migration::new(*version, Vec::new(), Vec::new()))
+                .collect(),
+        )
+        .expect("distinct versions")
+    }
+
+    #[test]
+    fn next_version_advances_past_the_highest_ordinal() {
+        assert_eq!(next_version(&set_of(&[]), "init"), "0001_init");
+        assert_eq!(next_version(&set_of(&["0001_a", "0002_b"]), "c"), "0003_c");
+        // A squash deleted 0002: the next version must not reuse or
+        // mis-sort against the applied 0003.
+        assert_eq!(
+            next_version(&set_of(&["0001_a", "0003_c"]), "add_users"),
+            "0004_add_users"
+        );
+    }
+
+    #[test]
+    fn names_slugify_into_version_identifiers() {
+        assert_eq!(next_version(&set_of(&[]), "Add Users!"), "0001_add_users_");
+    }
 }

@@ -3,17 +3,36 @@ use std::{error::Error, fmt};
 use crate::meta::ColumnType;
 
 /// Payload-kind mismatch found while converting one [`crate::Value`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValueTypeMismatch {
     expected: ColumnType,
     actual: &'static str,
+    detail: Option<String>,
 }
 
 impl ValueTypeMismatch {
     /// Creates a mismatch between an expected column type and a payload kind.
     #[must_use]
     pub const fn new(expected: ColumnType, actual: &'static str) -> Self {
-        Self { expected, actual }
+        Self {
+            expected,
+            actual,
+            detail: None,
+        }
+    }
+
+    /// Attaches the underlying failure's own message — a serde error, for
+    /// example — so a mismatch stays diagnosable.
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Returns the underlying failure's message, when one was attached.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// Returns the column type required by the Rust target type.
@@ -35,7 +54,11 @@ impl fmt::Display for ValueTypeMismatch {
             formatter,
             "expected {:?} value, found {} payload",
             self.expected, self.actual
-        )
+        )?;
+        if let Some(detail) = &self.detail {
+            write!(formatter, ": {detail}")?;
+        }
+        Ok(())
     }
 }
 

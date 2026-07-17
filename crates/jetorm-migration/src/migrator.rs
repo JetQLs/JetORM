@@ -111,7 +111,7 @@ impl<'a> Migrator<'a> {
     pub async fn applied(&self) -> Result<Vec<AppliedMigration>, MigrationError> {
         self.install().await?;
         let rows = sqlx::query(&format!(
-            "SELECT version, applied_at FROM \"{HISTORY_TABLE}\" ORDER BY version"
+            "SELECT version, applied_at FROM \"{HISTORY_TABLE}\" ORDER BY applied_at, version"
         ))
         .fetch_all(self.database.pool())
         .await?;
@@ -207,6 +207,47 @@ impl<'a> Migrator<'a> {
         Ok(applied)
     }
 
+    /// Applies exactly the given versions, verifying they are the leading
+    /// pending migrations at application time.
+    ///
+    /// This closes the gap between reviewing a plan and applying it: when
+    /// another process applies or adds migrations in between, the plan no
+    /// longer matches and this fails instead of applying something the
+    /// caller never vetted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pending set no longer starts with the
+    /// given versions, a migration cannot be rendered, or the database
+    /// rejects it.
+    pub async fn up_versions(&self, versions: &[String]) -> Result<Vec<String>, MigrationError> {
+        let pending = self.pending().await?;
+        if pending.len() < versions.len() {
+            return Err(MigrationError::InvalidVersion {
+                version: versions[pending.len().min(versions.len() - 1)].clone(),
+                detail: "no longer pending; the plan is stale".to_owned(),
+            });
+        }
+        for (expected, actual) in versions.iter().zip(&pending) {
+            if actual.version() != expected {
+                return Err(MigrationError::InvalidVersion {
+                    version: expected.clone(),
+                    detail: format!(
+                        "pending migrations changed since the plan was reviewed; \
+                         {} is next now",
+                        actual.version()
+                    ),
+                });
+            }
+        }
+        let mut applied = Vec::with_capacity(versions.len());
+        for migration in pending.into_iter().take(versions.len()) {
+            self.apply(migration).await?;
+            applied.push(migration.version().to_owned());
+        }
+        Ok(applied)
+    }
+
     /// Reverts applied migrations, newest first.
     ///
     /// Returns the versions reverted, in the order they were reverted.
@@ -216,12 +257,19 @@ impl<'a> Migrator<'a> {
     /// Returns an error when a migration is irreversible, cannot be
     /// rendered, or the database rejects it.
     pub async fn down(&self, count: usize) -> Result<Vec<String>, MigrationError> {
-        let status = self.status().await?;
-        let applied: Vec<&Migration> = status
-            .iter()
-            .filter(|entry| entry.state() == MigrationState::Applied)
-            .filter_map(|entry| self.migrations.get(entry.version()))
-            .collect();
+        // Recency order, not version order: with gap-filled application a
+        // lower version can be the most recently applied, and "revert the
+        // last migration" must mean the one that ran last.
+        let history = self.applied().await?;
+        let mut applied = Vec::with_capacity(history.len());
+        for record in &history {
+            let Some(migration) = self.migrations.get(record.version()) else {
+                return Err(MigrationError::UnknownAppliedVersion {
+                    version: record.version().to_owned(),
+                });
+            };
+            applied.push(migration);
+        }
 
         let mut reverted = Vec::new();
         for migration in applied.into_iter().rev().take(count) {

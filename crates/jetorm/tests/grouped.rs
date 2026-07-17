@@ -27,7 +27,30 @@ fn grouped_queries_render_where_before_group_by() {
     let statement = Postgres.render_query(&module).expect("grouped renders");
     assert_eq!(
         statement.sql(),
-        "SELECT \"t2\".\"customer\", \"t2\".\"count_0\", \"t2\".\"sum_1\", \"t2\".\"avg_2\" FROM (SELECT \"t1\".\"customer\" AS \"customer\", \"count\"(*) AS \"count_0\", \"sum\"(\"t1\".\"quantity\") AS \"sum_1\", \"avg\"(\"t1\".\"rating\") AS \"avg_2\" FROM (SELECT \"t0\".\"id\", \"t0\".\"customer\", \"t0\".\"quantity\", \"t0\".\"price\", \"t0\".\"rating\" FROM \"orders\" AS \"t0\" WHERE (\"t0\".\"quantity\" > $1::integer)) AS \"t1\" GROUP BY \"t1\".\"customer\") AS \"t2\" ORDER BY \"t2\".\"customer\" ASC NULLS LAST"
+        "SELECT \"t2\".\"customer\", \"t2\".\"__agg_0_count\", \"t2\".\"__agg_1_sum\", \"t2\".\"__agg_2_avg\" FROM (SELECT \"t1\".\"customer\" AS \"customer\", \"count\"(*) AS \"__agg_0_count\", \"sum\"(\"t1\".\"quantity\") AS \"__agg_1_sum\", \"avg\"(\"t1\".\"rating\") AS \"__agg_2_avg\" FROM (SELECT \"t0\".\"id\", \"t0\".\"customer\", \"t0\".\"quantity\", \"t0\".\"price\", \"t0\".\"rating\" FROM \"orders\" AS \"t0\" WHERE (\"t0\".\"quantity\" > $1::integer)) AS \"t1\" GROUP BY \"t1\".\"customer\") AS \"t2\" ORDER BY \"t2\".\"customer\" ASC NULLS LAST"
+    );
+}
+
+#[test]
+fn limits_and_duplicate_keys_are_rejected_at_lowering() {
+    // A limit's meaning under grouping is ambiguous — source rows or
+    // groups — so it must not guess.
+    let error = OrderEntity::find()
+        .limit(10)
+        .group_by((order::Customer,))
+        .select_agg((count_rows(),))
+        .into_afterburner_ir()
+        .expect_err("limit over grouping is ambiguous");
+    assert_eq!(error, jetorm::LoweringError::LimitOverGroup);
+
+    let error = OrderEntity::find()
+        .group_by((order::Customer, order::Customer))
+        .select_agg((count_rows(),))
+        .into_afterburner_ir()
+        .expect_err("a repeated key is a user error, not a verifier error");
+    assert_eq!(
+        error,
+        jetorm::LoweringError::DuplicateGroupKey { column: 1 }
     );
 }
 

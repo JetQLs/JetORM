@@ -192,8 +192,25 @@ impl Database {
     }
 
     /// Wraps an externally configured pool with explicit options.
+    ///
+    /// The pool already exists, so only JetORM's own options apply here —
+    /// the plan-cache capacity. Pool knobs set on the options cannot take
+    /// effect and are reported rather than silently dropped; configure the
+    /// pool itself, or connect through [`Database::connect_with`].
     #[must_use]
     pub fn from_pool_with(pool: PgPool, options: DatabaseOptions) -> Self {
+        if options.max_connections.is_some()
+            || options.min_connections.is_some()
+            || options.acquire_timeout.is_some()
+            || options.idle_timeout.is_some()
+            || options.max_lifetime.is_some()
+        {
+            tracing::warn!(
+                target: "jetorm::database",
+                "pool options set on DatabaseOptions are ignored by from_pool_with; \
+                 the pool is already built"
+            );
+        }
         Self {
             pool,
             plans: Arc::new(PlanCache::with_capacity(options.plan_cache_capacity)),
@@ -239,10 +256,14 @@ impl Executor for &Database {
         columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
         let span = query_span(&statement, binds.len());
-        async {
+        let recorder = span.clone();
+        async move {
             let query = build_query(&statement, &binds)?;
             let rows = query.fetch_all(&self.pool).await?;
-            tracing::Span::current().record("db.response.returned_rows", rows.len());
+            // Recording on the held span, not the current one: when this
+            // span is disabled by filtering, the current span is whatever
+            // encloses the caller, which must not receive our field.
+            recorder.record("db.response.returned_rows", rows.len());
             rows.iter().map(|row| decode_row(row, &columns)).collect()
         }
         .instrument(span)
@@ -319,10 +340,11 @@ impl Executor for &mut Transaction<'_> {
         columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
         let span = query_span(&statement, binds.len());
-        async {
+        let recorder = span.clone();
+        async move {
             let query = build_query(&statement, &binds)?;
             let rows = query.fetch_all(&mut *self.inner).await?;
-            tracing::Span::current().record("db.response.returned_rows", rows.len());
+            recorder.record("db.response.returned_rows", rows.len());
             rows.iter().map(|row| decode_row(row, &columns)).collect()
         }
         .instrument(span)

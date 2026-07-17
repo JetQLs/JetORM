@@ -229,15 +229,44 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     // Marker names already claimed by columns; relation markers share the
     // module, so a collision must be a spanned derive error rather than a
-    // bare rustc duplicate-definition error deep in generated code.
-    let mut claimed_markers: BTreeMap<String, String> = columns
+    // bare rustc duplicate-definition error deep in generated code. Two
+    // columns can also collide with each other — `user_id` and `userId`
+    // both yield `UserId` — so claiming is checked, not collected.
+    let mut claimed_markers: BTreeMap<String, String> = BTreeMap::new();
+    for column in &columns {
+        if let Some(previous) =
+            claimed_markers.insert(column.marker_ident.to_string(), column.rust_name.clone())
+        {
+            return Err(syn::Error::new(
+                column.field_ident.span(),
+                format!(
+                    "fields `{previous}` and `{}` generate the same column marker                      `{}`; rename one",
+                    column.rust_name, column.marker_ident
+                ),
+            ));
+        }
+    }
+    // The references path must mean the same type inside the marker module
+    // (where this table's own markers shadow glob imports) and at the outer
+    // scope (where FOREIGN_KEYS lives). Hidden aliases in the marker-free
+    // nested module give both sides one resolution point.
+    let relation_target_aliases = columns
         .iter()
-        .map(|column| (column.marker_ident.to_string(), column.rust_name.clone()))
-        .collect();
+        .filter(|column| column.attrs.references.is_some())
+        .enumerate()
+        .map(|(position, column)| {
+            let target = column.attrs.references.as_ref().expect("filtered above");
+            let alias = format_ident!("RelationTarget{position}");
+            quote! {
+                pub type #alias = #target;
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut relation_position = 0usize;
     let relation_markers = columns
         .iter()
         .filter_map(|column| {
-            let target = column.attrs.references.as_ref()?;
+            let _ = column.attrs.references.as_ref()?;
             // `author_id` names the edge `author` by convention; a field
             // without the suffix has no usable default, since the bare
             // field name is already the column marker's.
@@ -290,6 +319,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 "Relation marker `{}`: `{}.{}` references the target column.",
                 relation_name, container.table, column.sql_name,
             );
+            let target_alias = format_ident!("RelationTarget{relation_position}");
+            relation_position += 1;
             Some(Ok(quote! {
                 #[doc = #doc]
                 #[derive(Clone, Copy, Debug, Default)]
@@ -298,9 +329,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 #[automatically_derived]
                 impl #cr::Relation for #marker {
                     type Source = super::#entity_ident;
-                    type Target = <#target as #cr::Column>::Entity;
+                    type Target = <__jet_fields::#target_alias as #cr::Column>::Entity;
                     type SourceColumn = #source_marker;
-                    type TargetColumn = #target;
+                    type TargetColumn = __jet_fields::#target_alias;
                     const NAME: &'static str = #relation_name;
                     const TO_ONE: bool = true;
                     const FOREIGN_KEY: ::core::option::Option<#cr::ForeignKeyMeta> =
@@ -313,8 +344,13 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
+    let mut foreign_key_position = 0usize;
     let foreign_key_refs = columns.iter().enumerate().filter_map(|(index, column)| {
-        let target = column.attrs.references.as_ref()?;
+        let _ = column.attrs.references.as_ref()?;
+        let target_alias = format_ident!("RelationTarget{foreign_key_position}");
+        foreign_key_position += 1;
+        let target = quote!(#module_ident::__jet_fields::#target_alias);
+        let target = &target;
         let on_delete = column
             .attrs
             .on_delete
@@ -458,6 +494,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 use super::super::*;
 
                 #(#field_aliases)*
+
+                #(#relation_target_aliases)*
             }
 
             #(#column_markers)*

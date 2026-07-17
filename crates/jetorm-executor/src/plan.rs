@@ -74,7 +74,14 @@ impl PlanCache {
         // Concurrent misses of one shape may render it more than once; the
         // renders are equal and the last insert wins, which is harmless and
         // cheaper than holding a rendering slot across the cache.
+        let started = std::time::Instant::now();
         let statement = Arc::new(Self::render(query)?);
+        tracing::debug!(
+            target: "jetorm::plan_cache",
+            sql = statement.sql(),
+            render_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            "rendered statement on plan-cache miss"
+        );
         self.statements.insert(shape, Arc::clone(&statement));
         Ok(statement)
     }

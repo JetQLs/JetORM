@@ -59,6 +59,8 @@ sqlx = { version = "0.8.6", default-features = false, features = [
     "rust_decimal",
 ] }
 moka = { version = "0.12.15", features = ["sync"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = "0.3.20"
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 criterion = "0.8.2"
 toml = "1.1.3"

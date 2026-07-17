@@ -121,6 +121,7 @@ fn root_logical_kinds(module: &Module) -> Vec<String> {
                 OperationKind::Logical(LogicalOp::Distinct) => "distinct".to_owned(),
                 OperationKind::Logical(LogicalOp::Sort { .. }) => "sort".to_owned(),
                 OperationKind::Logical(LogicalOp::Limit { .. }) => "limit".to_owned(),
+                OperationKind::Scalar(ScalarOp::Parameter { .. }) => "param".to_owned(),
                 OperationKind::Terminator(TerminatorOp::QueryReturn) => "return".to_owned(),
                 other => format!("{other:?}"),
             }
@@ -165,9 +166,13 @@ fn full_pipeline_lowers_in_sql_evaluation_order() {
         .limit(10)
         .offset(20);
     let module = afterburner!(query).expect("full pipeline lowers to verified IR");
+    // The offset and fetch lower as parameter operands directly before the
+    // limit that consumes them.
     assert_eq!(
         root_logical_kinds(&module),
-        ["scan", "filter", "distinct", "sort", "limit", "return"]
+        [
+            "scan", "filter", "distinct", "sort", "param", "param", "limit", "return"
+        ]
     );
 }
 

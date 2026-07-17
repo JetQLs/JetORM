@@ -804,14 +804,33 @@ impl Verifier<'_> {
                     );
                 }
             }
-            LogicalOp::Limit { offset, fetch } => {
-                self.expect_shape(operation_id, 1, 1, 0);
+            LogicalOp::Limit {
+                has_offset,
+                has_fetch,
+            } => {
+                let counts = usize::from(*has_offset) + usize::from(*has_fetch);
+                self.expect_shape(operation_id, 1 + counts, 1, 0);
                 self.expect_same_relation_io(operation_id);
-                if offset.is_none() && fetch.is_none() {
+                if counts == 0 {
                     self.error(
                         VerificationLocation::Operation(operation_id),
                         "limit must specify an offset, fetch count, or both",
                     );
+                }
+                for index in 1..=counts {
+                    let valid = self
+                        .operand_type(operation_id, index)
+                        .and_then(Type::as_scalar)
+                        .is_some_and(|scalar| {
+                            matches!(scalar.kind(), SqlType::Integer { .. })
+                                && !scalar.is_nullable()
+                        });
+                    if !valid {
+                        self.error(
+                            VerificationLocation::Operation(operation_id),
+                            "limit count operands must be non-nullable integers",
+                        );
+                    }
                 }
             }
             LogicalOp::Distinct => {

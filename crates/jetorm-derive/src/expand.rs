@@ -1,4 +1,6 @@
-use proc_macro2::{Ident, TokenStream};
+use std::collections::BTreeMap;
+
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Fields};
 
@@ -10,8 +12,47 @@ struct EntityColumn {
     field_ty: syn::Type,
     marker_ident: Ident,
     sql_name: String,
+    /// Field name as written, with any raw-identifier prefix removed.
+    rust_name: String,
     spec: ColumnSpec,
     attrs: FieldAttrs,
+}
+
+/// Keywords that must be spelled `r#name` to be used as an identifier.
+///
+/// `self`, `Self`, `super`, and `crate` are deliberately absent: they are not
+/// valid raw identifiers, so names colliding with them are rejected instead.
+const RAW_ONLY_KEYWORDS: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let",
+    "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return",
+    "static", "struct", "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use",
+    "virtual", "where", "while", "yield",
+];
+
+/// Names that no identifier — raw or otherwise — may take.
+const RESERVED_NAMES: &[&str] = &["self", "Self", "super", "crate"];
+
+/// Strips a raw identifier's `r#` prefix, leaving the name it spells.
+fn unraw(ident: &Ident) -> String {
+    let spelled = ident.to_string();
+    spelled
+        .strip_prefix("r#")
+        .map_or(spelled.clone(), ToOwned::to_owned)
+}
+
+/// Builds an identifier, escaping it as raw when the name is a keyword.
+fn type_ident(name: &str, span: Span) -> Result<Ident, String> {
+    if RESERVED_NAMES.contains(&name) {
+        return Err(format!(
+            "the generated name `{name}` is reserved by Rust and cannot be escaped; \
+             rename the field or set `#[jet(column = \"...\")]`"
+        ));
+    }
+    if RAW_ONLY_KEYWORDS.contains(&name) {
+        return Ok(Ident::new_raw(name, span));
+    }
+    Ok(Ident::new(name, span))
 }
 
 pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -42,6 +83,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     let container = attrs::parse_container(input)?;
     let mut columns = Vec::with_capacity(fields.named.len());
+    let mut claimed_names: BTreeMap<String, Ident> = BTreeMap::new();
     for field in &fields.named {
         let field_ident = field
             .ident
@@ -54,14 +96,34 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 "`auto_increment` requires `primary_key` on the same field",
             ));
         }
-        let spec = types::resolve(&field.ty)?;
+        let spec = types::resolve(&field.ty);
+        // A raw identifier's `r#` prefix is Rust spelling, not part of the
+        // name: field `r#type` is the column `type` and the marker `Type`.
+        let rust_name = unraw(&field_ident);
         let sql_name = field_attrs
             .column
             .clone()
-            .unwrap_or_else(|| field_ident.to_string());
+            .unwrap_or_else(|| rust_name.clone());
+        if sql_name.is_empty() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "column name must not be empty",
+            ));
+        }
+        if let Some(previous) = claimed_names.insert(sql_name.clone(), field_ident.clone()) {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "column {sql_name:?} is already mapped by field `{previous}`; \
+                     two fields cannot share one column"
+                ),
+            ));
+        }
         columns.push(EntityColumn {
-            marker_ident: format_ident!("{}", pascal_case(&field_ident.to_string())),
+            marker_ident: type_ident(&pascal_case(&rust_name), field_ident.span())
+                .map_err(|message| syn::Error::new_spanned(field, message))?,
             sql_name,
+            rust_name,
             field_ty: field.ty.clone(),
             spec,
             attrs: field_attrs,
@@ -73,13 +135,21 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let vis = &input.vis;
     let model_ident = &input.ident;
     let entity_ident = format_ident!("{model_ident}Entity");
-    let module_ident = format_ident!(
-        "{}",
-        container
+    // A struct named e.g. `Type` yields the module name `type`, which only
+    // exists as a raw identifier.
+    let module_ident = type_ident(
+        &container
             .module
             .clone()
-            .unwrap_or_else(|| snake_case(&model_ident.to_string()))
-    );
+            .unwrap_or_else(|| snake_case(&unraw(model_ident))),
+        model_ident.span(),
+    )
+    .map_err(|message| {
+        syn::Error::new_spanned(
+            model_ident,
+            format!("{message}; or set `#[jet(module = \"...\")]`"),
+        )
+    })?;
 
     let table_meta = {
         let table = &container.table;
@@ -92,10 +162,19 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     let column_metas = columns.iter().map(|column| {
         let sql_name = &column.sql_name;
-        let rust_name = column.field_ident.to_string();
-        let column_type = &column.spec.column_type;
-        let mut meta =
-            quote!(#cr::ColumnMeta::new(#sql_name, #rust_name, #cr::ColumnType::#column_type));
+        let rust_name = &column.rust_name;
+        // The SQL kind comes from the `SqlValue` trait, not from a syntactic
+        // table: any type implementing `SqlValue` is a column type, aliases
+        // included, and an unsupported type fails with a trait error at the
+        // field rather than a macro error.
+        let column_type = column.attrs.column_type.as_ref().map_or_else(
+            || {
+                let inner = &column.spec.inner;
+                quote!(<#inner as #cr::SqlValue>::COLUMN_TYPE)
+            },
+            |variant| quote!(#cr::ColumnType::#variant),
+        );
+        let mut meta = quote!(#cr::ColumnMeta::new(#sql_name, #rust_name, #column_type));
         if column.spec.nullable {
             meta = quote!(#meta.nullable());
         }

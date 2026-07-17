@@ -22,15 +22,20 @@
 //! }
 //!
 //! fn main() {
-//!     use jetorm::{Dialect, Postgres};
+//!     use jetorm::{Dialect, IntoAfterBurnerIr, Postgres};
 //!
 //!     let query = UserEntity::find()
 //!         .filter(user::Email.like("%@example.com").and(user::Id.gt(100)))
 //!         .order_by(user::Id.desc())
 //!         .limit(20);
-//!     assert_eq!(query.binds().len(), 2);
+//!     // Two predicate values plus the row limit: every user value is a
+//!     // bind, so query shapes stay identical across bound values.
+//!     assert_eq!(query.binds().len(), 3);
 //!
-//!     let module = jetorm::afterburner!(query).expect("query lowers to verified IR");
+//!     // `render_query` verifies the module itself, so the lowering is left
+//!     // unverified here — verifying both sides would walk the module twice.
+//!     // (Executing through `SelectExecute` does all of this internally.)
+//!     let module = query.into_afterburner_ir().expect("query lowers to IR");
 //!     let statement = Postgres.render_query(&module).expect("IR renders to SQL");
 //!     assert!(statement.sql().starts_with("SELECT"));
 //! }

@@ -42,7 +42,11 @@ impl fmt::Display for ValueTypeMismatch {
 impl Error for ValueTypeMismatch {}
 
 /// Failure produced while reconstructing a model from positional values.
+///
+/// The set of failure modes grows as entities gain features, so callers must
+/// handle unknown variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// The row width does not match the entity's column count.
     ColumnCount {

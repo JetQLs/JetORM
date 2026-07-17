@@ -1,21 +1,44 @@
 use std::marker::PhantomData;
 
 use afterburner::ir::{BinaryOperator, NullOrder, SortDirection, UnaryOperator};
-use jetorm_entity::{Column, SqlValue, Value};
+use jetorm_entity::{Column, ColumnType, Entity, SqlValue, Value};
 
-/// Backend-independent scalar expression node.
+/// Static SQL typing of one expression operand.
 ///
-/// Nodes reference entity columns by position and carry user values inline
-/// until [`crate::Select`] normalizes them into positional binds. The node
-/// set mirrors the AfterBurner scalar dialect JetORM currently lowers.
-#[derive(Clone, Debug, PartialEq)]
+/// Operand types are captured when the expression is built, from the same
+/// column metadata the lowering uses for column references. Carrying them in
+/// the tree keeps lowering independent of bound values: the expression alone
+/// determines the IR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct OperandType {
+    pub(crate) column_type: ColumnType,
+    pub(crate) nullable: bool,
+}
+
+impl OperandType {
+    /// Reads the typing of one column from its entity metadata.
+    fn of_column<C>() -> Self
+    where
+        C: Column,
+    {
+        let meta = C::meta();
+        Self {
+            column_type: meta.column_type(),
+            nullable: meta.is_nullable(),
+        }
+    }
+}
+
+/// Expression tree as built by the column operators.
+///
+/// User values sit inline here until [`crate::Select::filter`] normalizes
+/// them into the query's positional bind table, which yields a [`Predicate`].
+#[derive(Clone, Debug)]
 pub(crate) enum Node {
     /// Reference to one entity column by position in `Entity::COLUMNS`.
     Column(usize),
-    /// Reference to one positional bind assigned during normalization.
-    Bind(usize),
     /// User value not yet assigned a bind position.
-    Value(Value),
+    Value { value: Value, ty: OperandType },
     /// One unary scalar operation.
     Unary {
         op: UnaryOperator,
@@ -29,19 +52,68 @@ pub(crate) enum Node {
     },
 }
 
-/// Typed scalar expression produced by column operators.
+/// Normalized expression tree holding bind positions instead of values.
 ///
-/// The type parameter tracks the expression's Rust-visible result type, so
-/// predicate combinators accept only boolean expressions. Values are captured
-/// by the expression and become positional binds when the expression is
-/// attached to a query.
-#[derive(Debug)]
-pub struct Expr<T> {
-    pub(crate) node: Node,
-    marker: PhantomData<fn() -> T>,
+/// A predicate contains no user data by construction, so it is exactly the
+/// value-independent shape of an expression: it hashes and compares as that
+/// shape, and lowering it needs no access to the bind table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Predicate {
+    /// Reference to one entity column by position in `Entity::COLUMNS`.
+    Column(usize),
+    /// Reference to one positional bind, with the typing of its operand.
+    Bind { position: u32, ty: OperandType },
+    /// One unary scalar operation.
+    Unary {
+        op: UnaryOperator,
+        operand: Box<Predicate>,
+    },
+    /// One binary scalar operation.
+    Binary {
+        op: BinaryOperator,
+        left: Box<Predicate>,
+        right: Box<Predicate>,
+    },
 }
 
-impl<T> Expr<T> {
+/// Replaces captured values with bind positions in expression pre-order.
+pub(crate) fn normalize(node: Node, binds: &mut Vec<Value>) -> Predicate {
+    match node {
+        Node::Column(index) => Predicate::Column(index),
+        Node::Value { value, ty } => {
+            let position = binds.len() as u32;
+            binds.push(value);
+            Predicate::Bind { position, ty }
+        }
+        Node::Unary { op, operand } => Predicate::Unary {
+            op,
+            operand: Box::new(normalize(*operand, binds)),
+        },
+        Node::Binary { op, left, right } => {
+            let left = normalize(*left, binds);
+            let right = normalize(*right, binds);
+            Predicate::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
+    }
+}
+
+/// Typed scalar expression produced by column operators.
+///
+/// The entity parameter binds the expression to the table it reads, so a
+/// predicate built from one entity's columns cannot be attached to another
+/// entity's query. The value parameter tracks the expression's result type,
+/// so predicate combinators accept only boolean expressions.
+#[derive(Debug)]
+pub struct Expr<E, T> {
+    pub(crate) node: Node,
+    marker: PhantomData<fn() -> (E, T)>,
+}
+
+impl<E, T> Expr<E, T> {
     pub(crate) const fn from_node(node: Node) -> Self {
         Self {
             node,
@@ -50,13 +122,16 @@ impl<T> Expr<T> {
     }
 }
 
-impl<T> Clone for Expr<T> {
+impl<E, T> Clone for Expr<E, T> {
     fn clone(&self) -> Self {
         Self::from_node(self.node.clone())
     }
 }
 
-impl Expr<bool> {
+impl<E> Expr<E, bool>
+where
+    E: Entity,
+{
     /// Combines two predicates with SQL three-valued conjunction.
     #[must_use]
     pub fn and(self, other: Self) -> Self {
@@ -82,7 +157,10 @@ impl Expr<bool> {
 ///
 /// The standard operator trait keeps both spellings available: `!predicate`
 /// and `predicate.not()`.
-impl std::ops::Not for Expr<bool> {
+impl<E> std::ops::Not for Expr<E, bool>
+where
+    E: Entity,
+{
     type Output = Self;
 
     fn not(self) -> Self {
@@ -93,37 +171,60 @@ impl std::ops::Not for Expr<bool> {
     }
 }
 
-/// One `ORDER BY` key over an entity column.
-///
-/// Created through [`ColumnExt::asc`] and [`ColumnExt::desc`]; null placement
-/// defaults to the target database's convention.
-#[derive(Clone, Copy, Debug)]
-pub struct OrderKey {
+/// Entity-independent ordering facts for one sort key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SortKeySpec {
     pub(crate) column: usize,
     pub(crate) direction: SortDirection,
     pub(crate) null_order: NullOrder,
 }
 
-impl OrderKey {
+/// One `ORDER BY` key over an entity column.
+///
+/// The entity parameter binds the key to the table it reads, so a key built
+/// from one entity's columns cannot order another entity's query. Created
+/// through [`ColumnExt::asc`] and [`ColumnExt::desc`]; null placement
+/// defaults to the target database's convention.
+#[derive(Debug)]
+pub struct OrderKey<E> {
+    pub(crate) spec: SortKeySpec,
+    marker: PhantomData<fn() -> E>,
+}
+
+impl<E> Clone for OrderKey<E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for OrderKey<E> {}
+
+impl<E> OrderKey<E>
+where
+    E: Entity,
+{
     const fn new(column: usize, direction: SortDirection) -> Self {
         Self {
-            column,
-            direction,
-            null_order: NullOrder::DialectDefault,
+            spec: SortKeySpec {
+                column,
+                direction,
+                null_order: NullOrder::DialectDefault,
+            },
+            marker: PhantomData,
         }
     }
 
     /// Places SQL `NULL` values before non-null values.
     #[must_use]
     pub const fn nulls_first(mut self) -> Self {
-        self.null_order = NullOrder::First;
+        self.spec.null_order = NullOrder::First;
         self
     }
 
     /// Places SQL `NULL` values after non-null values.
     #[must_use]
     pub const fn nulls_last(mut self) -> Self {
-        self.null_order = NullOrder::Last;
+        self.spec.null_order = NullOrder::Last;
         self
     }
 }
@@ -136,61 +237,61 @@ impl OrderKey {
 pub trait ColumnExt: Column + Sized {
     /// Builds a SQL equality predicate.
     #[must_use]
-    fn eq(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn eq(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::Equal, value.into())
     }
 
     /// Builds a SQL inequality predicate.
     #[must_use]
-    fn ne(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn ne(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::NotEqual, value.into())
     }
 
     /// Builds a strict less-than predicate.
     #[must_use]
-    fn lt(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn lt(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::LessThan, value.into())
     }
 
     /// Builds an inclusive less-than predicate.
     #[must_use]
-    fn le(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn le(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::LessThanOrEqual, value.into())
     }
 
     /// Builds a strict greater-than predicate.
     #[must_use]
-    fn gt(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn gt(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::GreaterThan, value.into())
     }
 
     /// Builds an inclusive greater-than predicate.
     #[must_use]
-    fn ge(self, value: impl Into<Self::Rust>) -> Expr<bool> {
+    fn ge(self, value: impl Into<Self::Rust>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::GreaterThanOrEqual, value.into())
     }
 
     /// Tests whether the stored value is SQL `NULL`.
     #[must_use]
-    fn is_null(self) -> Expr<bool> {
+    fn is_null(self) -> Expr<Self::Entity, bool> {
         null_test::<Self>(UnaryOperator::IsNull)
     }
 
     /// Tests whether the stored value is not SQL `NULL`.
     #[must_use]
-    fn is_not_null(self) -> Expr<bool> {
+    fn is_not_null(self) -> Expr<Self::Entity, bool> {
         null_test::<Self>(UnaryOperator::IsNotNull)
     }
 
     /// Orders by this column with the lowest value first.
     #[must_use]
-    fn asc(self) -> OrderKey {
+    fn asc(self) -> OrderKey<Self::Entity> {
         OrderKey::new(Self::INDEX, SortDirection::Ascending)
     }
 
     /// Orders by this column with the highest value first.
     #[must_use]
-    fn desc(self) -> OrderKey {
+    fn desc(self) -> OrderKey<Self::Entity> {
         OrderKey::new(Self::INDEX, SortDirection::Descending)
     }
 }
@@ -201,31 +302,36 @@ impl<C> ColumnExt for C where C: Column {}
 pub trait TextColumnExt: Column<Rust = String> + Sized {
     /// Builds a SQL `LIKE` pattern predicate.
     #[must_use]
-    fn like(self, pattern: impl Into<String>) -> Expr<bool> {
+    fn like(self, pattern: impl Into<String>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::Like, pattern.into())
     }
 
     /// Builds a case-insensitive `LIKE` pattern predicate.
     #[must_use]
-    fn ilike(self, pattern: impl Into<String>) -> Expr<bool> {
+    fn ilike(self, pattern: impl Into<String>) -> Expr<Self::Entity, bool> {
         compare::<Self>(BinaryOperator::CaseInsensitiveLike, pattern.into())
     }
 }
 
 impl<C> TextColumnExt for C where C: Column<Rust = String> {}
 
-fn compare<C>(op: BinaryOperator, value: C::Rust) -> Expr<bool>
+fn compare<C>(op: BinaryOperator, value: C::Rust) -> Expr<C::Entity, bool>
 where
     C: Column,
 {
     Expr::from_node(Node::Binary {
         op,
         left: Box::new(Node::Column(C::INDEX)),
-        right: Box::new(Node::Value(value.into_value())),
+        right: Box::new(Node::Value {
+            value: value.into_value(),
+            // The operand adopts the column's exact typing, so a comparison
+            // against a column never needs a widening cast during lowering.
+            ty: OperandType::of_column::<C>(),
+        }),
     })
 }
 
-fn null_test<C>(op: UnaryOperator) -> Expr<bool>
+fn null_test<C>(op: UnaryOperator) -> Expr<C::Entity, bool>
 where
     C: Column,
 {

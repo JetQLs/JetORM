@@ -804,3 +804,117 @@ fn fingerprints_include_window_specification_metadata() {
         structural_fingerprint(&descending).unwrap()
     );
 }
+
+/// Builds `scan -> limit -> return` where each requested count is a
+/// parameter operand of the given scalar type.
+fn build_limit_module(has_offset: bool, has_fetch: bool, count_type: Type) -> Module {
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let schema = editor.intern_schema(Schema::new(vec![Field::new("id", i64_type())]));
+        let relation = Type::relation(schema);
+        let scan = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Scan {
+                    table: afterburner::ir::TableRef::new("items"),
+                    columns: vec!["id".into()],
+                })
+                .with_result(relation.clone()),
+            )
+            .unwrap();
+        let mut operands = vec![editor.result(scan, 0).unwrap()];
+        for position in 0..u32::from(has_offset) + u32::from(has_fetch) {
+            let parameter = editor
+                .append_operation(
+                    root,
+                    OperationSpec::new(ScalarOp::Parameter {
+                        position,
+                        name: None,
+                    })
+                    .with_result(count_type.clone()),
+                )
+                .unwrap();
+            operands.push(editor.result(parameter, 0).unwrap());
+        }
+        let limit = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Limit {
+                    has_offset,
+                    has_fetch,
+                })
+                .with_operands(operands)
+                .with_result(relation),
+            )
+            .unwrap();
+        let limited = editor.result(limit, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![limited]),
+            )
+            .unwrap();
+    }
+    module
+}
+
+#[test]
+fn limit_accepts_parameter_count_operands() {
+    for (has_offset, has_fetch) in [(false, true), (true, false), (true, true)] {
+        let module = build_limit_module(has_offset, has_fetch, i64_type());
+        verify_module(&module).unwrap_or_else(|errors| {
+            panic!("limit(offset: {has_offset}, fetch: {has_fetch}) must verify: {errors:?}")
+        });
+    }
+}
+
+#[test]
+fn limit_requires_at_least_one_count() {
+    let module = build_limit_module(false, false, i64_type());
+    let errors = verify_module(&module).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message().contains("offset, fetch count, or both"))
+    );
+}
+
+#[test]
+fn limit_rejects_non_integer_and_nullable_counts() {
+    let text = Type::scalar(SqlType::Utf8, false);
+    let errors = verify_module(&build_limit_module(false, true, text)).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message().contains("non-nullable integers"))
+    );
+
+    let nullable = Type::scalar(
+        SqlType::Integer {
+            bits: 64,
+            signed: true,
+        },
+        true,
+    );
+    let errors = verify_module(&build_limit_module(false, true, nullable)).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message().contains("non-nullable integers"))
+    );
+}
+
+#[test]
+fn limit_fingerprint_depends_on_operand_presence_not_values() {
+    // Two identical parameterized shapes share one fingerprint; the bound
+    // values live outside the IR entirely.
+    let first = structural_fingerprint(&build_limit_module(false, true, i64_type())).unwrap();
+    let second = structural_fingerprint(&build_limit_module(false, true, i64_type())).unwrap();
+    assert_eq!(first, second);
+
+    // Presence flags are structural and must distinguish shapes.
+    let offset_only = structural_fingerprint(&build_limit_module(true, false, i64_type())).unwrap();
+    assert_ne!(first, offset_only);
+}

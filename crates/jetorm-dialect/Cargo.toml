@@ -17,7 +17,8 @@ workspace = true
 
 [dependencies]
 afterburner.workspace = true
+jetorm-entity.workspace = true
+jetorm-schema.workspace = true
 
 [dev-dependencies]
-jetorm-entity.workspace = true
 jetorm-query.workspace = true

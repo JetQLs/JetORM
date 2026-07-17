@@ -433,11 +433,17 @@ pub enum LogicalOp {
         keys: Vec<SortKey>,
     },
     /// Restricts or offsets one relation while preserving its type.
+    ///
+    /// Row counts are scalar operands rather than structural attributes, so
+    /// a frontend can pass them as parameters and every page of a paginated
+    /// query keeps one structural identity. Operand order is the input
+    /// relation, then the offset when present, then the fetch count when
+    /// present; each count operand must be a non-nullable integer.
     Limit {
-        /// Number of rows skipped before emission.
-        offset: Option<u64>,
-        /// Maximum emitted row count.
-        fetch: Option<u64>,
+        /// Whether an offset operand follows the relation operand.
+        has_offset: bool,
+        /// Whether a fetch-count operand is present.
+        has_fetch: bool,
     },
     /// Removes duplicate rows while preserving the relation type.
     Distinct,

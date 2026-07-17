@@ -94,3 +94,60 @@ fn derived_model_reports_width_and_kind_mismatches() {
     let error = User::from_values(values).expect_err("kind mismatch");
     assert!(matches!(error, DecodeError::Column { name: "name", .. }));
 }
+
+/// A user-defined identifier stored as `bigint`.
+///
+/// Implementing [`SqlValue`] is the whole extension mechanism: the derive
+/// resolves column types through the trait, so any implementing type is a
+/// column type — no registry, no macro attribute required.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccountId(pub i64);
+
+impl SqlValue for AccountId {
+    const COLUMN_TYPE: ColumnType = ColumnType::Int64;
+
+    fn into_value(self) -> Value {
+        Value::Int64(self.0)
+    }
+
+    fn from_value(value: Value) -> Result<Self, jetorm::ValueTypeMismatch> {
+        i64::from_value(value).map(Self)
+    }
+}
+
+/// The derive must see through type aliases: resolution is trait dispatch on
+/// the aliased type, not a match on the alias's name.
+pub type EmailAddress = String;
+
+#[derive(Clone, Debug, PartialEq, JetModel)]
+#[jet(table = "accounts")]
+pub struct Account {
+    #[jet(primary_key)]
+    pub id: AccountId,
+    pub contact: Option<EmailAddress>,
+    /// Stored as text despite the `String` default already being text; the
+    /// override attribute pins the SQL kind explicitly.
+    #[jet(column_type = "Json")]
+    pub settings: String,
+}
+
+#[test]
+fn user_types_and_aliases_resolve_through_the_sql_value_trait() {
+    assert_eq!(
+        AccountEntity::COLUMNS,
+        [
+            ColumnMeta::new("id", "id", ColumnType::Int64).primary_key(),
+            ColumnMeta::new("contact", "contact", ColumnType::Text).nullable(),
+            ColumnMeta::new("settings", "settings", ColumnType::Json),
+        ]
+    );
+
+    let account = Account {
+        id: AccountId(7),
+        contact: Some("a@example.com".to_owned()),
+        settings: "{}".to_owned(),
+    };
+    let values = account.clone().into_values();
+    assert_eq!(values[0], Value::Int64(7));
+    assert_eq!(Account::from_values(values), Ok(account));
+}

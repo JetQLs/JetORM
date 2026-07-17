@@ -1,6 +1,5 @@
 use std::future::Future;
 
-use afterburner::afterburner;
 use jetorm_entity::{Entity, Model};
 use jetorm_query::Select;
 
@@ -10,9 +9,9 @@ use crate::value::decode_row;
 
 /// Execution entry points for typed select queries.
 ///
-/// The methods consume the builder, run the full pipeline — lowering,
-/// verification, plan-cache lookup, binding, fetching, and decoding — and
-/// return entity models.
+/// The methods consume the builder, run the full pipeline — plan-cache
+/// lookup (lowering, verification, and SQL rendering on a miss), binding,
+/// fetching, and decoding — and return entity models.
 pub trait SelectExecute<E>: Sized
 where
     E: Entity,
@@ -42,12 +41,9 @@ where
     where
         X: Executor,
     {
-        let binds = self.binds().to_vec();
-        let module = afterburner!(self).map_err(ExecuteError::Build)?;
-        let statement = executor.plan_cache().statement(&module)?;
-        drop(module);
+        let statement = executor.plan_cache().statement(&self)?;
+        let rows = executor.fetch_rows(statement, self.into_binds()).await?;
 
-        let rows = executor.fetch_rows(statement, binds).await?;
         let mut models = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().enumerate() {
             let values = decode_row(row, E::COLUMNS)?;

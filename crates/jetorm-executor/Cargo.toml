@@ -26,5 +26,7 @@ sqlx.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jetorm-derive.workspace = true
+jetorm-schema.workspace = true
 testcontainers-modules.workspace = true
 tokio.workspace = true

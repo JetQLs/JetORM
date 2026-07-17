@@ -64,3 +64,14 @@ pub use database::{Database, Executor, Transaction};
 pub use error::ExecuteError;
 pub use plan::PlanCache;
 pub use select::SelectExecute;
+
+/// The `sqlx` version JetORM is built against.
+///
+/// [`Database::pool`] and [`Transaction::connection`] hand out driver types,
+/// and `sqlx` types only interoperate within one semver-compatible version.
+/// Reaching for the escape hatch through this re-export makes that agreement
+/// automatic instead of a version constraint downstream has to mirror.
+///
+/// [`Database::pool`]: crate::Database::pool
+/// [`Transaction::connection`]: crate::Transaction::connection
+pub use sqlx;

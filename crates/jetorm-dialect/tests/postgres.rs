@@ -109,9 +109,9 @@ fn full_pipeline_renders_one_flat_select() {
          FROM \"public\".\"users\" AS \"t0\" \
          WHERE ((\"t0\".\"email\" LIKE $1::text) AND (\"t0\".\"id\" > $2::bigint)) \
          ORDER BY \"t0\".\"id\" DESC \
-         LIMIT 20"
+         LIMIT $3::bigint"
     );
-    assert_eq!(statement.bind_order(), [0, 1]);
+    assert_eq!(statement.bind_order(), [0, 1, 2]);
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn distinct_and_offset_render_without_nesting() {
         statement.sql(),
         "SELECT DISTINCT \"t0\".\"id\", \"t0\".\"name\", \"t0\".\"email\" \
          FROM \"public\".\"users\" AS \"t0\" \
-         OFFSET 5"
+         OFFSET $1::bigint"
     );
 }
 
@@ -404,14 +404,25 @@ fn top_n_before_filter_nests_one_derived_table() {
             .expect("sort yield appends");
         let sorted = editor.result(sort, 0).expect("sort result");
 
+        let fetch = editor
+            .append_operation(
+                root,
+                OperationSpec::new(ScalarOp::Parameter {
+                    position: 0,
+                    name: None,
+                })
+                .with_result(bigint_type(false)),
+            )
+            .expect("fetch parameter appends");
+        let fetch_value = editor.result(fetch, 0).expect("fetch parameter result");
         let limit = editor
             .append_operation(
                 root,
                 OperationSpec::new(LogicalOp::Limit {
-                    offset: None,
-                    fetch: Some(3),
+                    has_offset: false,
+                    has_fetch: true,
                 })
-                .with_operands(vec![sorted])
+                .with_operands(vec![sorted, fetch_value])
                 .with_result(relation_type.clone()),
             )
             .expect("limit appends");
@@ -462,7 +473,7 @@ fn top_n_before_filter_nests_one_derived_table() {
         statement.sql(),
         "SELECT \"t1\".\"id\", \"t1\".\"name\" FROM \
          (SELECT \"t0\".\"id\", \"t0\".\"name\" FROM \"items\" AS \"t0\" \
-         ORDER BY \"t0\".\"id\" DESC LIMIT 3) AS \"t1\" \
+         ORDER BY \"t0\".\"id\" DESC LIMIT $1::bigint) AS \"t1\" \
          WHERE (\"t1\".\"name\" IS NOT NULL)"
     );
 }

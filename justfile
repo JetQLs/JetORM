@@ -28,6 +28,10 @@ db-down:
 test-live:
     cargo xtask test-live
 
+# Query-build benchmarks: JetORM vs SeaORM vs Diesel (criterion)
+bench:
+    cargo xtask bench
+
 # Everything CI runs without a database
 ci:
     cargo xtask ci

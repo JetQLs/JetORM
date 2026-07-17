@@ -11,6 +11,7 @@
 //!   epoch arithmetic (`DATE '1970-01-01' + n`) rather than locale-sensitive
 //!   text formats.
 
+pub mod ddl;
 mod scalar;
 mod select;
 mod types;
@@ -52,5 +53,14 @@ pub(crate) fn quote_identifier(name: &str) -> Result<String, RenderError> {
             "identifiers cannot contain NUL bytes",
         ));
     }
-    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+    // Embedded quotes are vanishingly rare; the common path pays for one
+    // allocation, not a `replace` scan-and-copy plus a `format!`.
+    if name.contains('"') {
+        return Ok(format!("\"{}\"", name.replace('"', "\"\"")));
+    }
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    quoted.push_str(name);
+    quoted.push('"');
+    Ok(quoted)
 }

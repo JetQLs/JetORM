@@ -1,19 +1,20 @@
 use std::{error::Error, fmt};
 
-use afterburner::AfterBurnerError;
-use afterburner::ir::FingerprintError;
 use jetorm_dialect::RenderError;
 use jetorm_entity::DecodeError;
 use jetorm_query::LoweringError;
 
 /// Failure produced while executing a JetORM query.
+///
+/// The set of failure modes grows as JetORM gains write paths and
+/// dialect-level features, so callers must handle unknown variants.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ExecuteError {
-    /// The typed query could not be lowered into verified IR.
-    Build(AfterBurnerError<LoweringError>),
-    /// The verified module could not be fingerprinted for the plan cache.
-    Fingerprint(FingerprintError),
-    /// The verified module could not be rendered as dialect SQL.
+    /// The typed query could not be lowered into IR.
+    Build(LoweringError),
+    /// The lowered module failed verification or could not be rendered as
+    /// dialect SQL.
     Render(RenderError),
     /// The database driver reported a connection or execution failure.
     Database(sqlx::Error),
@@ -32,11 +33,16 @@ pub enum ExecuteError {
     },
 }
 
+impl ExecuteError {
+    pub(crate) const fn lowering(error: LoweringError) -> Self {
+        Self::Build(error)
+    }
+}
+
 impl fmt::Display for ExecuteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Build(error) => write!(formatter, "query lowering failed: {error}"),
-            Self::Fingerprint(error) => write!(formatter, "plan-cache keying failed: {error}"),
             Self::Render(error) => write!(formatter, "SQL rendering failed: {error}"),
             Self::Database(error) => write!(formatter, "database error: {error}"),
             Self::MissingBind { position } => write!(
@@ -54,18 +60,11 @@ impl Error for ExecuteError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Build(error) => Some(error),
-            Self::Fingerprint(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::MissingBind { .. } => None,
             Self::Decode { source, .. } => Some(source),
         }
-    }
-}
-
-impl From<FingerprintError> for ExecuteError {
-    fn from(error: FingerprintError) -> Self {
-        Self::Fingerprint(error)
     }
 }
 

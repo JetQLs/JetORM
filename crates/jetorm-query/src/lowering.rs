@@ -6,9 +6,9 @@ use afterburner::ir::{
     ScalarOp, ScalarType, Schema, SortKey, SqlType, TableRef, TerminatorOp, TimeZone, Type,
     UnaryOperator, ValueId,
 };
-use jetorm_entity::{ColumnMeta, ColumnType, Entity, TableMeta, Value};
+use jetorm_entity::{ColumnMeta, ColumnType, Entity, TableMeta};
 
-use crate::expr::Node;
+use crate::expr::Predicate;
 use crate::select::Select;
 
 /// Fractional-second digits used for every temporal column type.
@@ -18,7 +18,11 @@ use crate::select::Select;
 const TEMPORAL_PRECISION: u8 = 6;
 
 /// Failure produced while lowering a typed query into AfterBurner IR.
+///
+/// The set of failure modes grows as the frontend gains expression and
+/// relational features, so callers must handle unknown variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoweringError {
     /// An IR edit was rejected; this indicates a bug in the lowering itself.
     Internal(EditError),
@@ -29,9 +33,6 @@ pub enum LoweringError {
         /// SQL kind of the right operand.
         right: SqlType,
     },
-    /// A captured value was never assigned a bind position; this indicates a
-    /// bug in query normalization.
-    UnboundValue,
 }
 
 impl fmt::Display for LoweringError {
@@ -42,9 +43,6 @@ impl fmt::Display for LoweringError {
                 formatter,
                 "operand SQL kinds {left:?} and {right:?} are incompatible"
             ),
-            Self::UnboundValue => {
-                formatter.write_str("expression value was not normalized into a bind")
-            }
         }
     }
 }
@@ -53,7 +51,7 @@ impl Error for LoweringError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Internal(error) => Some(error),
-            Self::OperandKindMismatch { .. } | Self::UnboundValue => None,
+            Self::OperandKindMismatch { .. } => None,
         }
     }
 }
@@ -120,14 +118,7 @@ where
             )?;
             let region = editor.add_region(filter)?;
             let block = editor.append_block(region, field_types.clone())?;
-            let (predicate_value, _) = lower_node(
-                &mut editor,
-                block,
-                predicate,
-                &select.binds,
-                E::COLUMNS,
-                None,
-            )?;
+            let (predicate_value, _) = lower_node(&mut editor, block, predicate, E::COLUMNS)?;
             editor.append_operation(
                 block,
                 OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
@@ -171,13 +162,37 @@ where
         }
 
         if select.offset.is_some() || select.fetch.is_some() {
+            // Row counts lower as parameters positioned directly after the
+            // predicate binds — the same order `Select::binds` emits values —
+            // so every page of a paginated query shares one statement.
+            let count_type = Type::scalar(
+                SqlType::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                false,
+            );
+            let mut operands = vec![relation];
+            let count_slots =
+                usize::from(select.offset.is_some()) + usize::from(select.fetch.is_some());
+            for slot in 0..count_slots {
+                let parameter = editor.append_operation(
+                    root,
+                    OperationSpec::new(ScalarOp::Parameter {
+                        position: (select.binds.len() + slot) as u32,
+                        name: None,
+                    })
+                    .with_result(count_type.clone()),
+                )?;
+                operands.push(editor.result(parameter, 0)?);
+            }
             let limit = editor.append_operation(
                 root,
                 OperationSpec::new(LogicalOp::Limit {
-                    offset: select.offset,
-                    fetch: select.fetch,
+                    has_offset: select.offset.is_some(),
+                    has_fetch: select.fetch.is_some(),
                 })
-                .with_operands(vec![relation])
+                .with_operands(operands)
                 .with_result(relation_type.clone()),
             )?;
             relation = editor.result(limit, 0)?;
@@ -191,43 +206,35 @@ where
     Ok(module)
 }
 
-/// Lowers one expression node inside a row-lambda block.
+/// Lowers one predicate node inside a row-lambda block.
 ///
-/// `expected` propagates a partner operand's scalar type onto binds, so a
-/// value compared against a column adopts the column's exact type, including
-/// nullability, without a widening cast.
+/// The predicate carries the static typing of every operand, so lowering
+/// never consults the bind table: the query's shape alone determines its IR.
 fn lower_node(
     editor: &mut IrEditor<'_>,
     block: BlockId,
-    node: &Node,
-    binds: &[Value],
+    node: &Predicate,
     columns: &'static [ColumnMeta],
-    expected: Option<&ScalarType>,
 ) -> Result<(ValueId, ScalarType), LoweringError> {
     match node {
-        Node::Column(index) => {
+        Predicate::Column(index) => {
             let value = editor.block_argument(block, *index)?;
             Ok((value, column_scalar_type(&columns[*index])))
         }
-        Node::Bind(position) => {
-            let ty = expected.cloned().unwrap_or_else(|| {
-                let bind = &binds[*position];
-                ScalarType::new(sql_type(bind.column_type()), bind.is_null())
-            });
+        Predicate::Bind { position, ty } => {
+            let ty = ScalarType::new(sql_type(ty.column_type), ty.nullable);
             let parameter = editor.append_operation(
                 block,
                 OperationSpec::new(ScalarOp::Parameter {
-                    position: *position as u32,
+                    position: *position,
                     name: None,
                 })
                 .with_result(Type::Scalar(ty.clone())),
             )?;
             Ok((editor.result(parameter, 0)?, ty))
         }
-        Node::Value(_) => Err(LoweringError::UnboundValue),
-        Node::Unary { op, operand } => {
-            let (operand_value, operand_ty) =
-                lower_node(editor, block, operand, binds, columns, None)?;
+        Predicate::Unary { op, operand } => {
+            let (operand_value, operand_ty) = lower_node(editor, block, operand, columns)?;
             let result_ty = match op {
                 UnaryOperator::IsNull | UnaryOperator::IsNotNull => {
                     ScalarType::new(SqlType::Boolean, false)
@@ -242,21 +249,9 @@ fn lower_node(
             )?;
             Ok((editor.result(operation, 0)?, result_ty))
         }
-        Node::Binary { op, left, right } => {
-            // A bind adopts the partner column's exact type up front, so the
-            // common column-versus-value comparison needs no widening cast.
-            let left_expected = column_peek(right, columns);
-            let right_expected = column_peek(left, columns);
-            let (left_value, left_ty) =
-                lower_node(editor, block, left, binds, columns, left_expected.as_ref())?;
-            let (right_value, right_ty) = lower_node(
-                editor,
-                block,
-                right,
-                binds,
-                columns,
-                right_expected.as_ref(),
-            )?;
+        Predicate::Binary { op, left, right } => {
+            let (left_value, left_ty) = lower_node(editor, block, left, columns)?;
+            let (right_value, right_ty) = lower_node(editor, block, right, columns)?;
             let (left_value, right_value, operand_ty) = unify_nullability(
                 editor,
                 block,
@@ -272,14 +267,6 @@ fn lower_node(
             )?;
             Ok((editor.result(operation, 0)?, result_ty))
         }
-    }
-}
-
-/// Returns a column reference's scalar type without lowering it.
-fn column_peek(node: &Node, columns: &'static [ColumnMeta]) -> Option<ScalarType> {
-    match node {
-        Node::Column(index) => Some(column_scalar_type(&columns[*index])),
-        Node::Bind(_) | Node::Value(_) | Node::Unary { .. } | Node::Binary { .. } => None,
     }
 }
 

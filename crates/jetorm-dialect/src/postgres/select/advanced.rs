@@ -145,7 +145,9 @@ impl Renderer<'_> {
         let mut rendered = Vec::with_capacity(inputs.len());
         for input in inputs {
             let builder = self.build_relation(input)?;
-            if !builder.order_sql.is_empty() && builder.fetch.is_none() && builder.offset.is_none()
+            if !builder.order_sql.is_empty()
+                && builder.fetch_sql.is_none()
+                && builder.offset_sql.is_none()
             {
                 return Err(RenderError::unsupported(
                     "an ORDER BY without a row limit cannot be preserved inside a set operand",

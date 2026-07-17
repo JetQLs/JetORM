@@ -164,6 +164,203 @@ impl SortKey {
     }
 }
 
+/// Unit used to measure a SQL window frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WindowFrameUnit {
+    /// Counts physical rows relative to the current row.
+    Rows,
+    /// Uses the ordering value domain relative to the current row.
+    Range,
+    /// Counts peer groups defined by the window ordering.
+    Groups,
+}
+
+/// One boundary of a SQL window frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WindowFrameBound {
+    /// Starts at the first row or peer group in the partition.
+    UnboundedPreceding,
+    /// Uses the next frame-offset operand as a distance before the current row.
+    Preceding,
+    /// Uses the current row or its peer group as the boundary.
+    CurrentRow,
+    /// Uses the next frame-offset operand as a distance after the current row.
+    Following,
+    /// Ends at the last row or peer group in the partition.
+    UnboundedFollowing,
+}
+
+/// Rows removed from a SQL window frame after its boundaries are applied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WindowFrameExclusion {
+    /// Retains every row selected by the frame boundaries.
+    #[default]
+    NoOthers,
+    /// Excludes only the current row.
+    CurrentRow,
+    /// Excludes the current row and all of its ordering peers.
+    Group,
+    /// Excludes ordering peers while retaining the current row.
+    Ties,
+}
+
+/// Complete SQL window-frame description.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowFrame {
+    unit: WindowFrameUnit,
+    start: WindowFrameBound,
+    end: Option<WindowFrameBound>,
+    exclusion: WindowFrameExclusion,
+}
+
+impl WindowFrame {
+    /// Creates the single-bound SQL form with an implicit `CURRENT ROW` end.
+    ///
+    /// The exclusion defaults to [`WindowFrameExclusion::NoOthers`].
+    #[must_use]
+    pub const fn new(unit: WindowFrameUnit, start: WindowFrameBound) -> Self {
+        Self {
+            unit,
+            start,
+            end: None,
+            exclusion: WindowFrameExclusion::NoOthers,
+        }
+    }
+
+    /// Creates a frame with explicit `BETWEEN` boundaries.
+    #[must_use]
+    pub const fn between(
+        unit: WindowFrameUnit,
+        start: WindowFrameBound,
+        end: WindowFrameBound,
+    ) -> Self {
+        Self {
+            unit,
+            start,
+            end: Some(end),
+            exclusion: WindowFrameExclusion::NoOthers,
+        }
+    }
+
+    /// Sets the rows excluded after applying the frame boundaries.
+    #[must_use]
+    pub const fn with_exclusion(mut self, exclusion: WindowFrameExclusion) -> Self {
+        self.exclusion = exclusion;
+        self
+    }
+
+    /// Returns the frame measurement unit.
+    #[must_use]
+    pub const fn unit(self) -> WindowFrameUnit {
+        self.unit
+    }
+
+    /// Returns the starting boundary.
+    #[must_use]
+    pub const fn start(self) -> WindowFrameBound {
+        self.start
+    }
+
+    /// Returns the optional ending boundary.
+    #[must_use]
+    pub const fn end(self) -> Option<WindowFrameBound> {
+        self.end
+    }
+
+    /// Returns the row-exclusion policy.
+    #[must_use]
+    pub const fn exclusion(self) -> WindowFrameExclusion {
+        self.exclusion
+    }
+
+    /// Returns the number of trailing SSA operands consumed by frame offsets.
+    ///
+    /// When both bounds use offsets, the start-bound operand precedes the
+    /// end-bound operand.
+    #[must_use]
+    pub const fn offset_count(self) -> usize {
+        let start = match self.start {
+            WindowFrameBound::Preceding | WindowFrameBound::Following => 1,
+            WindowFrameBound::UnboundedPreceding
+            | WindowFrameBound::CurrentRow
+            | WindowFrameBound::UnboundedFollowing => 0,
+        };
+        let end = match self.end {
+            Some(WindowFrameBound::Preceding | WindowFrameBound::Following) => 1,
+            Some(
+                WindowFrameBound::UnboundedPreceding
+                | WindowFrameBound::CurrentRow
+                | WindowFrameBound::UnboundedFollowing,
+            )
+            | None => 0,
+        };
+        start + end
+    }
+}
+
+/// Operand layout and frame metadata for one window-function call.
+///
+/// Operation operands are ordered as function arguments, partition keys,
+/// ordering expressions, and optional start/end frame-offset expressions. The
+/// owning [`ScalarOp::WindowCall`] records the function-argument count. This
+/// keeps every referenced expression in ordinary SSA def-use chains instead of
+/// hiding [`ValueId`] handles inside attributes. Offset operands exist only for
+/// [`WindowFrameBound::Preceding`] and [`WindowFrameBound::Following`], with the
+/// start-bound offset before the end-bound offset.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WindowSpec {
+    partition_keys: u32,
+    order_keys: Vec<SortKey>,
+    frame: Option<WindowFrame>,
+}
+
+impl WindowSpec {
+    /// Creates a specification without an explicit frame.
+    #[must_use]
+    pub fn new(partition_keys: u32, order_keys: Vec<SortKey>) -> Self {
+        Self {
+            partition_keys,
+            order_keys,
+            frame: None,
+        }
+    }
+
+    /// Creates the global, unordered window represented by `OVER ()`.
+    #[must_use]
+    pub const fn global() -> Self {
+        Self {
+            partition_keys: 0,
+            order_keys: Vec::new(),
+            frame: None,
+        }
+    }
+
+    /// Attaches an explicit frame.
+    #[must_use]
+    pub fn with_frame(mut self, frame: WindowFrame) -> Self {
+        self.frame = Some(frame);
+        self
+    }
+
+    /// Returns the number of partition-key operands.
+    #[must_use]
+    pub const fn partition_key_count(&self) -> u32 {
+        self.partition_keys
+    }
+
+    /// Returns descriptors aligned with the ordering-expression operands.
+    #[must_use]
+    pub fn order_keys(&self) -> &[SortKey] {
+        &self.order_keys
+    }
+
+    /// Returns the optional frame.
+    #[must_use]
+    pub const fn frame(&self) -> Option<&WindowFrame> {
+        self.frame.as_ref()
+    }
+}
+
 /// Built-in logical relational dialect.
 ///
 /// Operands, results, nested regions, and CFG successors live in the generic
@@ -197,6 +394,11 @@ pub enum LogicalOp {
     /// match the result schema in field order.
     Project,
     /// Combines two relation operands into one relation result.
+    ///
+    /// Result fields follow positional SQL semantics. Inner and cross joins
+    /// concatenate the left and right rows; outer joins additionally widen
+    /// nullability on the null-extended side; semi and anti joins retain only
+    /// the left row.
     Join {
         /// Join null-extension and membership semantics.
         kind: JoinKind,
@@ -205,13 +407,22 @@ pub enum LogicalOp {
     },
     /// Computes grouping keys and aggregate values in one expression region.
     ///
-    /// The operation consumes and produces one relation. Yielded value types
-    /// match the result schema in field order.
-    Aggregate,
+    /// The region yields `group_keys` grouping expressions followed by values
+    /// matching the result schema. Grouping expressions therefore remain
+    /// explicit even when they are not returned by the aggregate relation.
+    /// Output expressions that depend on input rows must use these exact SSA
+    /// values as dependency roots; recomputing an equivalent expression does
+    /// not establish grouping identity.
+    Aggregate {
+        /// Number of leading yielded values used as grouping expressions.
+        group_keys: u32,
+    },
     /// Computes window-function values without collapsing rows.
     ///
     /// The operation consumes and produces one relation through an expression
-    /// region whose yielded value types match the result schema.
+    /// region whose yielded value types match the result schema. Each
+    /// [`ScalarOp::WindowCall`] owns an independent [`WindowSpec`], so one
+    /// region may express multiple window definitions.
     Window,
     /// Orders one relation by expressions yielded from an optional key region.
     ///
@@ -344,6 +555,10 @@ pub enum ScalarOp {
     WindowCall {
         /// Window function identity.
         function: FunctionRef,
+        /// Number of leading operands passed to the function itself.
+        argument_count: u32,
+        /// Partitioning, ordering, and frame semantics plus operand layout.
+        window: WindowSpec,
         /// Reordering and folding contract.
         volatility: Volatility,
         /// Effects not already implied by volatility.

@@ -10,7 +10,8 @@ pub use module::{Block, Module, Region, RegionParent, Value, ValueDefinition, Va
 pub use operation::{
     Attribute, BinaryOperator, EffectSet, ExtensionOp, JoinKind, LogicalOp, NullOrder, Operation,
     OperationKind, OperationMetadata, OperationSpec, ScalarOp, SetOperator, SortDirection, SortKey,
-    TerminatorOp, UnaryOperator,
+    TerminatorOp, UnaryOperator, WindowFrame, WindowFrameBound, WindowFrameExclusion,
+    WindowFrameUnit, WindowSpec,
 };
 pub use types::{
     Field, FloatBits, FunctionRef, Literal, ScalarKind, ScalarType, Schema, SourceSpan, SqlType,

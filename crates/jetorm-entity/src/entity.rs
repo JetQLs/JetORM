@@ -68,6 +68,16 @@ pub trait SingleKeyEntity: Entity {
     type PrimaryKeyColumn: Column<Entity = Self> + Default;
 }
 
+/// Columns whose stored value can never be SQL `NULL`.
+///
+/// Blanket-implemented for every column whose field type equals its inner
+/// Rust type — exactly the non-`Option` fields. Cursor keys require this:
+/// a `NULL` never satisfies the boundary comparisons a keyset walk builds,
+/// so rows with `NULL` keys would silently fall out of pagination.
+pub trait NonNullColumn: Column<Field = <Self as Column>::Rust> {}
+
+impl<C> NonNullColumn for C where C: Column<Field = <C as Column>::Rust> {}
+
 /// Entities with a primary key of any width.
 ///
 /// `#[derive(JetModel)]` implements this for every entity declaring at

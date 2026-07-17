@@ -379,7 +379,7 @@ async fn staged_constraints_enforce_new_writes_before_old_rows_validate() {
         .await
         .expect_err("existing rows violate the constraint");
     assert!(
-        error.to_string().contains("repair the data and rerun"),
+        error.to_string().contains("repair the data, then run"),
         "the error names the recovery path: {error}"
     );
     let applied = migrator.applied().await.expect("history reads");

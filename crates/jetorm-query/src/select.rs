@@ -44,6 +44,10 @@ pub struct QueryShape {
     /// Whether the query collapses to a single `count(*)` row. A count and a
     /// select over the same builder must never share a cached statement.
     count: bool,
+    /// The relation joined onto the base entity, identified by its marker
+    /// type. Joins over different edges — or a join and its plain select —
+    /// must never share a cached statement.
+    join: Option<TypeId>,
 }
 
 impl PartialEq for QueryShape {
@@ -60,6 +64,7 @@ impl PartialEq for QueryShape {
             && self.distinct == other.distinct
             && self.projection == other.projection
             && self.count == other.count
+            && self.join == other.join
             && match (&self.filter, &other.filter) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
@@ -78,7 +83,7 @@ impl Hash for QueryShape {
 
 /// Process-wide hash seed shared by every shape, which is exactly a plan
 /// cache's scope.
-fn shape_seed() -> &'static RandomState {
+pub(crate) fn shape_seed() -> &'static RandomState {
     static SEED: LazyLock<RandomState> = LazyLock::new(RandomState::new);
     &SEED
 }
@@ -238,6 +243,7 @@ where
         self.order.hash(&mut hasher);
         (has_offset, has_fetch, self.distinct, false).hash(&mut hasher);
         self.projection.hash(&mut hasher);
+        None::<TypeId>.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -249,6 +255,7 @@ where
             distinct: self.distinct,
             projection: self.projection.clone(),
             count: false,
+            join: None,
         }
     }
 
@@ -331,6 +338,7 @@ where
         Vec::<SortKeySpec>::new().hash(&mut hasher);
         (has_offset, has_fetch, self.distinct, true).hash(&mut hasher);
         None::<Vec<usize>>.hash(&mut hasher);
+        None::<TypeId>.hash(&mut hasher);
 
         QueryShape {
             hash: hasher.finish(),
@@ -342,6 +350,7 @@ where
             distinct: self.distinct,
             projection: None,
             count: true,
+            join: None,
         }
     }
 }
@@ -360,6 +369,43 @@ where
             .field("fetch", &self.fetch)
             .field("distinct", &self.distinct)
             .finish()
+    }
+}
+
+impl QueryShape {
+    /// Builds the shape of a relation join over a base select.
+    ///
+    /// Only the join module constructs these; the join is identified by the
+    /// marker type so different edges between the same entities stay
+    /// distinct.
+    pub(crate) fn for_join<E>(select: &Select<E>, join: TypeId) -> Self
+    where
+        E: Entity,
+    {
+        let entity = TypeId::of::<E>();
+        let has_offset = select.offset.is_some();
+        let has_fetch = select.fetch.is_some();
+
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        select.filter.hash(&mut hasher);
+        select.order.hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct, false).hash(&mut hasher);
+        select.projection.hash(&mut hasher);
+        Some(join).hash(&mut hasher);
+
+        Self {
+            hash: hasher.finish(),
+            entity,
+            filter: select.filter.clone(),
+            order: select.order.clone(),
+            has_offset,
+            has_fetch,
+            distinct: select.distinct,
+            projection: select.projection.clone(),
+            count: false,
+            join: Some(join),
+        }
     }
 }
 

@@ -66,11 +66,13 @@
 #![warn(missing_docs)]
 
 mod expr;
+mod join;
 mod lowering;
 mod projection;
 mod select;
 
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
+pub use join::JoinSelect;
 pub use lowering::LoweringError;
 pub use projection::{ColumnList, Projected};
 pub use select::{CacheableQuery, CountQuery, EntityQuery, QueryShape, Select};

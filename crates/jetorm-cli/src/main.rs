@@ -16,6 +16,7 @@ use jetorm_migration::{Migration, MigrationSet, MigrationState, MigrationStep, M
 use jetorm_schema::{RenameCandidate, SchemaSet, diff};
 
 mod codegen;
+mod ui;
 
 #[derive(Parser)]
 #[command(name = "jet", version, about = "JetORM migration tooling")]
@@ -35,6 +36,18 @@ enum Command {
     /// Verify the database, the migration files, and the target schema
     /// agree; exits 1 on any disagreement.
     Check(CheckArgs),
+    /// Open the interactive migration dashboard.
+    Ui(UiArgs),
+}
+
+#[derive(Args)]
+struct UiArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+    /// Serialized target `SchemaSet` (TOML); enables drift review and
+    /// rename confirmation.
+    #[arg(long)]
+    schema: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -154,6 +167,7 @@ fn main() -> ExitCode {
             Command::Migrate(MigrateCommand::Generate(args)) => generate(&args),
             Command::Db(DbCommand::Pull(args)) => pull(args).await,
             Command::Check(args) => check(args).await,
+            Command::Ui(args) => tui(args).await,
         }
     });
     match result {
@@ -406,6 +420,18 @@ async fn check(args: CheckArgs) -> Result<ExitCode, String> {
     } else {
         Ok(ExitCode::FAILURE)
     }
+}
+
+async fn tui(args: UiArgs) -> Result<ExitCode, String> {
+    let database = Database::connect(&args.connection.database_url)
+        .await
+        .map_err(|error| format!("cannot connect: {error}"))?;
+    let schema = match &args.schema {
+        Some(path) => Some(load_schema(path)?),
+        None => None,
+    };
+    ui::run(&database, args.connection.dir, schema).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn pull(args: PullArgs) -> Result<ExitCode, String> {

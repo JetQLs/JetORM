@@ -17,6 +17,8 @@ workspace = true
 
 [dependencies]
 clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
 jetorm-entity.workspace = true
 jetorm-executor.workspace = true
 jetorm-migration.workspace = true

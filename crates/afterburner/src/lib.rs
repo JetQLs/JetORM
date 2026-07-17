@@ -62,9 +62,9 @@
 //! assert_eq!(module.block(module.root_block()).unwrap().operations().len(), 2);
 //! ```
 //!
-//! The crate defines IR construction and integrity primitives. SQL parsing,
-//! optimizer pipelines, physical planning, and live profile storage belong to
-//! layers built on top of this representation.
+//! The crate defines IR construction, integrity primitives, and reusable pass
+//! execution through [`pass::PassManager`]. SQL parsing, physical planning, and
+//! live profile storage belong to layers built on top of this representation.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -75,3 +75,4 @@ mod macros;
 pub use frontend::{AfterBurnerError, AfterBurnerOptions, IntoAfterBurnerIr};
 
 pub mod ir;
+pub mod pass;

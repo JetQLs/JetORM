@@ -433,9 +433,50 @@ impl TableDef {
 }
 
 /// One complete schema state: every table, deterministically ordered.
+///
+/// Serialized as a sequence of table definitions rather than a map:
+/// structured keys have no representation in formats like TOML and JSON,
+/// and each definition already carries its identity. The order is the
+/// deterministic `(schema, name)` order, so serialized schemas diff
+/// cleanly under version control.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaSet {
+    #[serde(with = "tables_as_sequence")]
     tables: BTreeMap<TableName, TableDef>,
+}
+
+mod tables_as_sequence {
+    use std::collections::BTreeMap;
+
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{TableDef, TableName};
+
+    pub fn serialize<S>(
+        tables: &BTreeMap<TableName, TableDef>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(tables.len()))?;
+        for table in tables.values() {
+            sequence.serialize_element(table)?;
+        }
+        sequence.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<TableName, TableDef>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let tables = Vec::<TableDef>::deserialize(deserializer)?;
+        Ok(tables
+            .into_iter()
+            .map(|table| (table.name().clone(), table))
+            .collect())
+    }
 }
 
 impl SchemaSet {

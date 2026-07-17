@@ -150,6 +150,17 @@ pub trait SqlValue: Sized {
     fn from_value(value: Value) -> Result<Self, ValueTypeMismatch>;
 }
 
+/// A [`SqlValue`] holding one scalar — not an array.
+///
+/// Operations that build an array *around* the value — membership tests
+/// binding their list as one array parameter — require this bound, so an
+/// array column cannot take them: the resulting nested array has no wire
+/// representation, and the mismatch should be a compile error, not a
+/// runtime bind failure.
+pub trait ScalarValue: SqlValue {}
+
+impl<T: ScalarValue> ScalarValue for Option<T> {}
+
 macro_rules! impl_sql_value {
     ($rust:ty, $column_type:ident, $variant:ident) => {
         impl SqlValue for $rust {
@@ -169,6 +180,8 @@ macro_rules! impl_sql_value {
                 }
             }
         }
+
+        impl ScalarValue for $rust {}
     };
 }
 

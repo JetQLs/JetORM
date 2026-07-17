@@ -17,6 +17,7 @@ use jetorm_schema::{ColumnDef, ForeignKeyDef, SchemaChange, TableDef, TableName}
 
 use crate::error::RenderError;
 use crate::postgres::quote_identifier;
+use crate::postgres::types::custom_type_name;
 
 /// Fractional-second digits used for every temporal column type; matches the
 /// query lowering in `jetorm-query`.
@@ -52,13 +53,30 @@ pub fn render_change(change: &SchemaChange) -> Result<Vec<String>, RenderError> 
             quote_identifier(to)?
         )]),
         SchemaChange::AlterColumnType {
-            table, column, to, ..
+            table,
+            column,
+            to,
+            from_type_name,
+            to_type_name,
+            ..
         } => {
             let column = quote_identifier(column)?;
-            let type_name = column_type_name(*to);
+            let type_name = match to_type_name {
+                Some(name) => custom_type_name(name)?,
+                None => column_type_name(*to),
+            };
+            // A named type on either side routes the cast through text:
+            // two enums have no direct cast between them, and text is the
+            // representation every enum casts to and from. Values outside
+            // the target's labels fail at apply time — honestly.
+            let cast = if from_type_name.is_some() || to_type_name.is_some() {
+                format!("{column}::text::{type_name}")
+            } else {
+                format!("{column}::{type_name}")
+            };
             Ok(vec![format!(
                 "ALTER TABLE {} ALTER COLUMN {column} TYPE {type_name} \
-                 USING {column}::{type_name}",
+                 USING {cast}",
                 table_sql(table)?
             )])
         }
@@ -138,17 +156,17 @@ pub fn render_change(change: &SchemaChange) -> Result<Vec<String>, RenderError> 
             }
             Ok(vec![format!(
                 "CREATE TYPE {} AS ENUM ({})",
-                quote_identifier(name)?,
+                custom_type_name(name)?,
                 spelled.join(", ")
             )])
         }
         SchemaChange::AddEnumVariant { name, variant } => Ok(vec![format!(
             "ALTER TYPE {} ADD VALUE {}",
-            quote_identifier(name)?,
+            custom_type_name(name)?,
             quote_literal(variant)
         )]),
         SchemaChange::DropEnum { name } => {
-            Ok(vec![format!("DROP TYPE {}", quote_identifier(name)?)])
+            Ok(vec![format!("DROP TYPE {}", custom_type_name(name)?)])
         }
     }
 }
@@ -320,7 +338,7 @@ fn column_sql(column: &ColumnDef) -> Result<String, RenderError> {
     // A named type overrides the dialect's spelling of the column type —
     // this is how native enum columns take their `CREATE TYPE`d type.
     let type_sql = match column.type_name() {
-        Some(name) => quote_identifier(name)?,
+        Some(name) => custom_type_name(name)?,
         None => column_type_name(column.column_type()),
     };
     let mut sql = format!("{} {}", quote_identifier(column.name())?, type_sql);

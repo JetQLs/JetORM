@@ -134,9 +134,11 @@ pub async fn introspect(
             .or_default()
             .push(row.get(1));
     }
-    for (name, variants) in &enum_variants {
-        schema.insert_enum(name, variants.clone());
-    }
+    // Only enums a pulled column actually references enter the schema:
+    // entity-derived schemas carry exactly the referenced enums, so an
+    // unused type recorded here would diff as perpetual DropEnum churn.
+    // Unused ones are noted below instead.
+    let mut used_enums: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     let tables = sqlx::query(
         "SELECT table_name FROM information_schema.tables
@@ -156,7 +158,8 @@ pub async fn introspect(
 
         let columns = sqlx::query(
             "SELECT column_name, udt_name, is_nullable, identity_generation,
-                    column_default, character_maximum_length
+                    column_default, character_maximum_length, udt_schema,
+                    domain_name
              FROM information_schema.columns
              WHERE table_schema = $1 AND table_name = $2
              ORDER BY ordinal_position",
@@ -168,26 +171,43 @@ pub async fn introspect(
         for column_row in columns {
             let column_name: String = column_row.get(0);
             let udt_name: String = column_row.get(1);
-            // An enum-typed column is text-backed in the model, carrying
-            // the type's name; arrays of enums have no Rust field type
-            // yet and skip like any unmapped column.
-            let enum_name = enum_variants
-                .contains_key(&udt_name)
-                .then(|| udt_name.clone());
-            let column_type = match (&enum_name, column_type_of(&udt_name)) {
+            let udt_schema: String = column_row.get(6);
+            // The catalog resolves a domain column to its base type;
+            // the domain's identity, CHECKs, and default vanish in the
+            // flattening and must be said out loud.
+            let domain_name: Option<String> = column_row.get(7);
+            if let Some(domain) = &domain_name {
+                notes.push(format!(
+                    "{table_name}.{column_name}: domain {domain:?} pulled as \
+                     its base type; domain constraints and defaults are not \
+                     represented"
+                ));
+            }
+            // Names alone don't identify a type: the same udt_name can
+            // name an enum here, a built-in in pg_catalog, and something
+            // else in a third namespace. Enums must live in the pulled
+            // schema, built-ins in pg_catalog; anything else is skipped
+            // with its full name, never guessed.
+            let enum_name = (udt_schema == schema_name && enum_variants.contains_key(&udt_name))
+                .then(|| qualified_type(schema_name, &udt_name));
+            let builtin = (udt_schema == "pg_catalog")
+                .then(|| column_type_of(&udt_name))
+                .flatten();
+            let column_type = match (&enum_name, builtin) {
                 (Some(_), _) => ColumnType::Text,
                 (None, Some(column_type)) => column_type,
                 (None, None) => {
                     skipped.push(SkippedColumn {
                         table: table_name.clone(),
                         column: column_name,
-                        data_type: udt_name,
+                        data_type: format!("{udt_schema}.{udt_name}"),
                     });
                     continue;
                 }
             };
             let mut definition = ColumnDef::new(&column_name, column_type);
             if let Some(enum_name) = enum_name {
+                used_enums.insert(udt_name.clone());
                 definition = definition.with_type_name(enum_name);
             }
             let is_nullable: String = column_row.get(2);
@@ -222,6 +242,16 @@ pub async fn introspect(
                 notes.push(format!(
                     "{table_name}.{column_name}: {udt_name}({length}) mapped \
                      to text; the length limit is not represented"
+                ));
+            }
+            // Arrays report no character_maximum_length, so the length
+            // check above can never fire for them; the loss is the same
+            // and gets the same note.
+            if matches!(udt_name.as_str(), "_varchar" | "_bpchar") {
+                notes.push(format!(
+                    "{table_name}.{column_name}: {} array mapped to text[]; \
+                     element length limits are not represented",
+                    udt_name.trim_start_matches('_')
                 ));
             }
             table = table.with_column(definition);
@@ -294,6 +324,17 @@ pub async fn introspect(
         table = table.with_primary_key(primary_key);
 
         schema.insert(table);
+    }
+
+    for (name, variants) in &enum_variants {
+        if used_enums.contains(name) {
+            schema.insert_enum(qualified_type(schema_name, name), variants.clone());
+        } else {
+            notes.push(format!(
+                "enum type {name:?} is not used by any pulled column and was \
+                 not recorded; it would otherwise diff as a perpetual drop"
+            ));
+        }
     }
 
     // Foreign keys, single-column only; the referencing and referenced
@@ -376,6 +417,17 @@ fn action_code(code: &str) -> ReferentialAction {
         "n" => ReferentialAction::SetNull,
         "d" => ReferentialAction::SetDefault,
         _ => referential_action_of(code),
+    }
+}
+
+/// Spells a type name the way the schema records it: bare in `public`,
+/// schema-qualified elsewhere — mirroring table naming, so a baseline
+/// replayed on a fresh database creates the type in its own schema.
+fn qualified_type(schema_name: &str, type_name: &str) -> String {
+    if schema_name == "public" {
+        type_name.to_owned()
+    } else {
+        format!("{schema_name}.{type_name}")
     }
 }
 

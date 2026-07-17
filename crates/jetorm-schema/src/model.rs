@@ -164,6 +164,10 @@ impl ColumnDef {
         self.column_type = column_type;
     }
 
+    pub(crate) fn set_type_name(&mut self, type_name: Option<String>) {
+        self.type_name = type_name;
+    }
+
     pub(crate) fn set_nullable(&mut self, nullable: bool) {
         self.nullable = nullable;
     }

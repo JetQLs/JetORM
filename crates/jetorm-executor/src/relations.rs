@@ -60,7 +60,7 @@ where
     R: Relation,
     X: Executor,
     R::SourceColumn: Default,
-    Key<R>: Eq + Hash + Clone,
+    Key<R>: Eq + Hash + Clone + jetorm_entity::ScalarValue,
     R::TargetColumn: Column<Rust = Key<R>>,
     SourceModel<R>: Clone,
 {
@@ -139,7 +139,7 @@ where
     R: Relation,
     X: Executor,
     R::TargetColumn: Default + Column<Rust = Key<R>>,
-    Key<R>: Eq + Hash + Clone,
+    Key<R>: Eq + Hash + Clone + jetorm_entity::ScalarValue,
     TargetModel<R>: Clone,
 {
     let source_keys: Vec<Option<Key<R>>> = sources

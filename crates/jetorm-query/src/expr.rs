@@ -313,6 +313,10 @@ pub trait ColumnExt: Column + Sized {
     where
         I: IntoIterator,
         I::Item: Into<Self::Rust>,
+        // The list binds as one array of the column's type; an array
+        // column would need a nested array, which has no wire form —
+        // rejected here rather than at bind time.
+        Self::Rust: jetorm_entity::ScalarValue,
     {
         let element = <Self::Rust as SqlValue>::COLUMN_TYPE;
         let values: Vec<Value> = values

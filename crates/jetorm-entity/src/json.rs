@@ -55,3 +55,5 @@ where
         })
     }
 }
+
+impl<T> crate::value::ScalarValue for Json<T> where T: Serialize + DeserializeOwned {}

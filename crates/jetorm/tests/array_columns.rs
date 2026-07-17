@@ -185,6 +185,25 @@ async fn array_columns_round_trip_on_live_postgres() {
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0].tags, ["rust", "orm"]);
 
+    // An external writer can store a NULL element — legal in PostgreSQL,
+    // unrepresentable in Vec<T>. The read fails as a named condition
+    // pointing at the stored state, not a raw driver error.
+    sqlx::query("UPDATE boards SET tags = ARRAY['a', NULL] WHERE scores = ARRAY[]::integer[]")
+        .execute(db.pool())
+        .await
+        .expect("the external write runs");
+    let poisoned = BoardEntity::find().all(&db).await;
+    match poisoned {
+        Err(jetorm::ExecuteError::ArrayDecode { detail, .. }) => {
+            assert!(detail.contains("NULL element"), "{detail}");
+        }
+        other => panic!("expected ArrayDecode for the NULL element, got {other:?}"),
+    }
+    sqlx::query("UPDATE boards SET tags = ARRAY[]::text[] WHERE scores = ARRAY[]::integer[]")
+        .execute(db.pool())
+        .await
+        .expect("cleanup runs");
+
     // Updates replace the whole array.
     BoardEntity::update()
         .set(board::Tags, vec!["updated".to_owned()])

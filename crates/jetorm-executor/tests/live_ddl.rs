@@ -89,6 +89,8 @@ async fn rendered_ddl_round_trips_against_live_postgres() {
             column: "bio".to_owned(),
             from: ColumnType::Text,
             to: ColumnType::Json,
+            from_type_name: None,
+            to_type_name: None,
         },
         SchemaChange::SetUnique {
             table: table.clone(),

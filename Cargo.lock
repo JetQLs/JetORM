@@ -1703,6 +1703,7 @@ dependencies = [
  "jetorm-executor",
  "jetorm-migration",
  "jetorm-schema",
+ "sqlx",
  "tempfile",
  "testcontainers-modules",
  "tokio",

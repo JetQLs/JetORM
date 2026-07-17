@@ -34,10 +34,12 @@
 
 mod error;
 mod history;
+mod introspect;
 mod migration;
 mod migrator;
 
 pub use error::MigrationError;
 pub use history::{AppliedMigration, HISTORY_TABLE};
+pub use introspect::{Introspection, SkippedColumn, introspect};
 pub use migration::{Migration, MigrationSet, MigrationStep};
 pub use migrator::{MigrationState, MigrationStatus, Migrator};

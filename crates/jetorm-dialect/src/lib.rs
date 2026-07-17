@@ -10,18 +10,23 @@
 //! The renderer is deliberately conservative:
 //!
 //! - Consecutive relational operations fuse into one flat `SELECT` only when
-//!   SQL clause evaluation order (`FROM` → `WHERE` → `DISTINCT` → `ORDER BY`
-//!   → `LIMIT`) matches the operation order. Anything else is wrapped in a
-//!   derived table, and shapes SQL cannot express faithfully — such as an
-//!   interior sort without a row limit, whose ordering a subquery does not
-//!   preserve — are rejected with [`RenderError::Unsupported`] instead of
-//!   silently producing misleading SQL.
+//!   SQL clause evaluation order (`FROM` → `WHERE` → projection/aggregation →
+//!   `DISTINCT` → `ORDER BY` → `LIMIT`) matches the operation order. Anything
+//!   else is wrapped in a derived table, and shapes SQL cannot express
+//!   faithfully — such as an interior sort without a row limit, whose ordering
+//!   a subquery does not preserve — are rejected with
+//!   [`RenderError::Unsupported`] instead of silently producing misleading SQL.
 //! - Every IR parameter renders with an explicit type cast derived from its
 //!   SSA type, so prepared-statement type inference can never fail or drift.
 //! - Sub-expressions are always parenthesized; correctness never depends on
 //!   an operator-precedence table.
-//! - Operations the dialect cannot render yet (joins, aggregates, window
-//!   functions, set operations, extension dialects) fail loudly with a
+//! - Aggregate regions yield an explicit grouping-key prefix before their
+//!   result values. This preserves hidden grouping keys and renders a global
+//!   aggregate as the explicit empty grouping set `GROUP BY ()`.
+//! - Every window call carries its own partition keys, ordering policies, and
+//!   optional frame. All referenced expressions remain ordinary SSA operands,
+//!   including dynamic frame offsets.
+//! - Extension operations without a PostgreSQL lowering fail loudly with a
 //!   precise diagnostic.
 //!
 //! Statements are rendered from IR after optimizer passes, so a

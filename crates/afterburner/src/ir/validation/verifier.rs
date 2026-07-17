@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::{
     BinaryOperator, BlockId, Literal, LogicalOp, Module, OperationId, OperationKind, ProfileSiteId,
     RegionId, RegionParent, ScalarOp, SchemaId, SqlType, TerminatorOp, Type, UnaryOperator,
-    ValueDefinition, ValueId, ValueUse,
+    ValueDefinition, ValueId, ValueUse, WindowFrameBound, WindowFrameUnit, WindowSpec,
 };
 
 /// Arena entity associated with one verifier diagnostic.
@@ -767,8 +767,18 @@ impl Verifier<'_> {
                         "join must produce one relation",
                     );
                 }
+                self.verify_join_result_schema(operation_id, *kind);
             }
-            LogicalOp::Aggregate | LogicalOp::Window => {
+            LogicalOp::Aggregate { group_keys } => {
+                self.expect_shape(operation_id, 1, 1, 1);
+                if let (Some(input), Some(output)) = (
+                    self.operand_schema(operation_id, 0),
+                    self.result_schema(operation_id, 0),
+                ) {
+                    self.verify_aggregate_region(operation_id, input, output, *group_keys);
+                }
+            }
+            LogicalOp::Window => {
                 self.expect_shape(operation_id, 1, 1, 1);
                 if let (Some(input), Some(output)) = (
                     self.operand_schema(operation_id, 0),
@@ -1037,10 +1047,296 @@ impl Verifier<'_> {
                     );
                 }
             }
-            ScalarOp::Call { .. }
-            | ScalarOp::AggregateCall { .. }
-            | ScalarOp::WindowCall { .. } => {}
+            ScalarOp::Call { .. } => {
+                self.verify_scalar_call_operands(operation_id, "function");
+            }
+            ScalarOp::AggregateCall { .. } => {
+                if !matches!(
+                    self.enclosing_logical(operation_id),
+                    Some(LogicalOp::Aggregate { .. })
+                ) {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "aggregate calls are valid only inside an aggregate region",
+                    );
+                }
+                self.verify_scalar_call_operands(operation_id, "aggregate");
+                self.verify_no_nested_aggregate_or_window_calls(operation_id, "aggregate");
+            }
+            ScalarOp::WindowCall {
+                argument_count,
+                window,
+                ..
+            } => {
+                if !matches!(
+                    self.enclosing_logical(operation_id),
+                    Some(LogicalOp::Window)
+                ) {
+                    self.error(
+                        VerificationLocation::Operation(operation_id),
+                        "window calls are valid only inside a window region",
+                    );
+                }
+                self.verify_scalar_call_operands(operation_id, "window");
+                self.verify_no_nested_aggregate_or_window_calls(operation_id, "window");
+                self.verify_window_spec(operation_id, *argument_count, window);
+            }
         }
+    }
+
+    fn enclosing_logical(&self, operation_id: OperationId) -> Option<&LogicalOp> {
+        let operation = self.module.operation(operation_id)?;
+        let block = self.module.block(operation.parent())?;
+        let region = self.module.region(block.parent())?;
+        let RegionParent::Operation(owner) = region.parent() else {
+            return None;
+        };
+        let owner = self.module.operation(owner)?;
+        let OperationKind::Logical(logical) = owner.kind() else {
+            return None;
+        };
+        Some(logical)
+    }
+
+    fn verify_no_nested_aggregate_or_window_calls(
+        &mut self,
+        operation_id: OperationId,
+        call_kind: &str,
+    ) {
+        let Some(operation) = self.module.operation(operation_id) else {
+            return;
+        };
+        let block = operation.parent();
+        let empty_groups = HashSet::new();
+        let mut contains_special_call = false;
+        for operand in operation.operands() {
+            let mut memo = HashMap::new();
+            let dependencies =
+                self.aggregate_dependencies(block, *operand, &empty_groups, &mut memo);
+            contains_special_call |=
+                dependencies.contains_aggregate || dependencies.contains_window;
+        }
+        if contains_special_call {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                format!("{call_kind} call operands cannot contain aggregate or window calls"),
+            );
+        }
+    }
+
+    fn verify_scalar_call_operands(&mut self, operation_id: OperationId, call_kind: &str) {
+        let has_non_scalar = self
+            .module
+            .operation(operation_id)
+            .is_some_and(|operation| {
+                operation.operands().iter().any(|operand| {
+                    self.module
+                        .value(*operand)
+                        .is_none_or(|value| value.ty().as_scalar().is_none())
+                })
+            });
+        if has_non_scalar {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                format!("{call_kind} call operands must be scalar"),
+            );
+        }
+    }
+
+    fn verify_window_spec(
+        &mut self,
+        operation_id: OperationId,
+        argument_count: u32,
+        window: &WindowSpec,
+    ) {
+        let Some(operation) = self.module.operation(operation_id) else {
+            return;
+        };
+        let Ok(partition_count) = usize::try_from(window.partition_key_count()) else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window partition-key count does not fit this target",
+            );
+            return;
+        };
+        let Ok(argument_count) = usize::try_from(argument_count) else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window function-argument count does not fit this target",
+            );
+            return;
+        };
+        let order_count = window.order_keys().len();
+        let offset_count = window.frame().map_or(0, |frame| frame.offset_count());
+        let Some(expected_count) = argument_count
+            .checked_add(partition_count)
+            .and_then(|count| count.checked_add(order_count))
+            .and_then(|count| count.checked_add(offset_count))
+        else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window operand layout overflows this target",
+            );
+            return;
+        };
+        if expected_count != operation.operands().len() {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window operand count must equal its function, partition, order, and frame layout",
+            );
+            return;
+        }
+
+        let metadata_start = argument_count;
+        let offset_start = metadata_start + partition_count + order_count;
+        if operation.operands()[metadata_start..]
+            .iter()
+            .any(|operand| {
+                self.module
+                    .value(*operand)
+                    .is_none_or(|value| value.ty().as_scalar().is_none())
+            })
+        {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window partition, order, and frame-offset operands must be scalar",
+            );
+        }
+
+        if let Some(frame) = window.frame() {
+            self.verify_window_frame(operation_id, window, *frame);
+            let empty_groups = HashSet::new();
+            for offset in &operation.operands()[offset_start..] {
+                let mut memo = HashMap::new();
+                let dependencies = self.aggregate_dependencies(
+                    operation.parent(),
+                    *offset,
+                    &empty_groups,
+                    &mut memo,
+                );
+                if dependencies.unaggregated_row
+                    || dependencies.contains_aggregate
+                    || dependencies.contains_window
+                {
+                    self.error(
+                        VerificationLocation::Value(*offset),
+                        "window frame offsets cannot reference rows, aggregates, or windows",
+                    );
+                }
+                if matches!(
+                    frame.unit(),
+                    WindowFrameUnit::Rows | WindowFrameUnit::Groups
+                ) && self
+                    .module
+                    .value(*offset)
+                    .and_then(|value| value.ty().as_scalar())
+                    .is_some_and(|scalar| !matches!(scalar.kind(), SqlType::Integer { .. }))
+                {
+                    self.error(
+                        VerificationLocation::Value(*offset),
+                        "ROWS and GROUPS frame offsets must have an integer type",
+                    );
+                }
+            }
+        }
+    }
+
+    fn verify_window_frame(
+        &mut self,
+        operation_id: OperationId,
+        window: &WindowSpec,
+        frame: super::WindowFrame,
+    ) {
+        if frame.start() == WindowFrameBound::UnboundedFollowing {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window frame start cannot be UNBOUNDED FOLLOWING",
+            );
+        }
+        if frame.end() == Some(WindowFrameBound::UnboundedPreceding) {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window frame end cannot be UNBOUNDED PRECEDING",
+            );
+        }
+        let effective_end = frame.end().unwrap_or(WindowFrameBound::CurrentRow);
+        if window_bound_rank(effective_end) < window_bound_rank(frame.start()) {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "window frame end cannot precede its start category",
+            );
+        }
+        let has_offset = frame.offset_count() != 0;
+        if frame.unit() == WindowFrameUnit::Range && has_offset && window.order_keys().len() != 1 {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "RANGE frames with offsets require exactly one ordering key",
+            );
+        }
+        if frame.unit() == WindowFrameUnit::Groups && window.order_keys().is_empty() {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "GROUPS frames require at least one ordering key",
+            );
+        }
+    }
+
+    fn aggregate_dependencies(
+        &self,
+        block: BlockId,
+        value_id: ValueId,
+        group_keys: &HashSet<ValueId>,
+        memo: &mut HashMap<ValueId, AggregateDependencies>,
+    ) -> AggregateDependencies {
+        if group_keys.contains(&value_id) {
+            return AggregateDependencies::default();
+        }
+        if let Some(dependencies) = memo.get(&value_id) {
+            return *dependencies;
+        }
+        // Break malformed cycles. The ordinary dominance verifier reports the
+        // structural error; this semantic walk must remain total on invalid IR.
+        memo.insert(value_id, AggregateDependencies::default());
+        let dependencies = match self.module.value(value_id).map(super::Value::definition) {
+            Some(ValueDefinition::BlockArgument {
+                block: definition, ..
+            }) => AggregateDependencies {
+                unaggregated_row: definition == block,
+                ..AggregateDependencies::default()
+            },
+            Some(ValueDefinition::OperationResult { operation, .. }) => {
+                let Some(defining) = self.module.operation(operation) else {
+                    return AggregateDependencies::default();
+                };
+                match defining.kind() {
+                    OperationKind::Scalar(ScalarOp::AggregateCall { .. }) => {
+                        AggregateDependencies {
+                            contains_aggregate: true,
+                            ..AggregateDependencies::default()
+                        }
+                    }
+                    OperationKind::Scalar(ScalarOp::WindowCall { .. }) => AggregateDependencies {
+                        contains_window: true,
+                        ..AggregateDependencies::default()
+                    },
+                    OperationKind::Scalar(_) => {
+                        let mut dependencies = AggregateDependencies::default();
+                        for operand in defining.operands() {
+                            dependencies = dependencies.union(
+                                self.aggregate_dependencies(block, *operand, group_keys, memo),
+                            );
+                        }
+                        dependencies
+                    }
+                    OperationKind::Logical(_)
+                    | OperationKind::Terminator(_)
+                    | OperationKind::Extension(_) => AggregateDependencies::default(),
+                }
+            }
+            None => AggregateDependencies::default(),
+        };
+        memo.insert(value_id, dependencies);
+        dependencies
     }
 
     fn expect_shape(
@@ -1127,6 +1423,146 @@ impl Verifier<'_> {
         self.verify_yield(block_id, expectation);
     }
 
+    fn verify_aggregate_region(
+        &mut self,
+        operation_id: OperationId,
+        input: SchemaId,
+        output: SchemaId,
+        group_keys: u32,
+    ) {
+        let Some(operation) = self.module.operation(operation_id) else {
+            return;
+        };
+        let Some(region_id) = operation.regions().first().copied() else {
+            return;
+        };
+        let Some(region) = self.module.region(region_id) else {
+            return;
+        };
+        if region.blocks().len() != 1 {
+            self.error(
+                VerificationLocation::Region(region_id),
+                "aggregate expression region must contain exactly one block",
+            );
+            return;
+        }
+        let block_id = region.blocks()[0];
+        let Some(block) = self.module.block(block_id) else {
+            return;
+        };
+        let expected_arguments = self
+            .module
+            .schema(input)
+            .map(super::Schema::field_types)
+            .unwrap_or_default();
+        let actual_arguments: Vec<Type> = block
+            .arguments()
+            .iter()
+            .filter_map(|argument| self.module.value(*argument).map(|value| value.ty().clone()))
+            .collect();
+        if actual_arguments != expected_arguments {
+            self.error(
+                VerificationLocation::Block(block_id),
+                "aggregate region arguments must match input row fields",
+            );
+        }
+
+        let Some(terminator_id) = block.operations().last().copied() else {
+            return;
+        };
+        let Some(terminator) = self.module.operation(terminator_id) else {
+            return;
+        };
+        if terminator.kind() != &OperationKind::Terminator(TerminatorOp::Yield) {
+            self.error(
+                VerificationLocation::Operation(terminator_id),
+                "aggregate expression region must end in yield",
+            );
+            return;
+        }
+        let Ok(group_count) = usize::try_from(group_keys) else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "aggregate group-key count does not fit this target",
+            );
+            return;
+        };
+        let output_types = self
+            .module
+            .schema(output)
+            .map(super::Schema::field_types)
+            .unwrap_or_default();
+        let Some(expected_count) = group_count.checked_add(output_types.len()) else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "aggregate yield count overflows this target",
+            );
+            return;
+        };
+        if terminator.operands().len() != expected_count {
+            self.error(
+                VerificationLocation::Operation(terminator_id),
+                format!(
+                    "aggregate region must yield {group_count} group keys followed by {} output values",
+                    output_types.len()
+                ),
+            );
+            return;
+        }
+        let (group_values, output_values) = terminator.operands().split_at(group_count);
+        let yielded_output_types: Vec<Type> = output_values
+            .iter()
+            .filter_map(|value| self.module.value(*value).map(|stored| stored.ty().clone()))
+            .collect();
+        if yielded_output_types != output_types {
+            self.error(
+                VerificationLocation::Operation(terminator_id),
+                "aggregate output values must match the result relation schema",
+            );
+        }
+
+        let no_groups = HashSet::new();
+        for group in group_values {
+            if self
+                .module
+                .value(*group)
+                .is_none_or(|value| value.ty().as_scalar().is_none())
+            {
+                self.error(
+                    VerificationLocation::Value(*group),
+                    "aggregate group keys must be scalar",
+                );
+            }
+            let mut memo = HashMap::new();
+            let dependencies = self.aggregate_dependencies(block_id, *group, &no_groups, &mut memo);
+            if dependencies.contains_aggregate || dependencies.contains_window {
+                self.error(
+                    VerificationLocation::Value(*group),
+                    "aggregate group keys cannot contain aggregate or window calls",
+                );
+            }
+        }
+
+        let group_set: HashSet<ValueId> = group_values.iter().copied().collect();
+        for output_value in output_values {
+            let mut memo = HashMap::new();
+            let dependencies =
+                self.aggregate_dependencies(block_id, *output_value, &group_set, &mut memo);
+            if dependencies.contains_window {
+                self.error(
+                    VerificationLocation::Value(*output_value),
+                    "aggregate outputs cannot contain window calls",
+                );
+            }
+            if dependencies.unaggregated_row {
+                self.error(
+                    VerificationLocation::Value(*output_value),
+                    "aggregate outputs may reference rows only through explicit group keys or aggregate calls",
+                );
+            }
+        }
+    }
+
     fn verify_join_region(&mut self, operation_id: OperationId, left: SchemaId, right: SchemaId) {
         // A join predicate is the same row-lambda convention with left fields
         // followed by right fields, and exactly one Boolean yield.
@@ -1173,6 +1609,71 @@ impl Verifier<'_> {
             );
         }
         self.verify_yield(block_id, YieldExpectation::Boolean);
+    }
+
+    fn verify_join_result_schema(&mut self, operation_id: OperationId, kind: super::JoinKind) {
+        let (Some(left_id), Some(right_id), Some(output_id)) = (
+            self.operand_schema(operation_id, 0),
+            self.operand_schema(operation_id, 1),
+            self.result_schema(operation_id, 0),
+        ) else {
+            return;
+        };
+        let (Some(left), Some(right), Some(output)) = (
+            self.module.schema(left_id),
+            self.module.schema(right_id),
+            self.module.schema(output_id),
+        ) else {
+            return;
+        };
+
+        let left_types = left.field_types();
+        let right_types = right.field_types();
+        let nullable = |types: &[Type]| -> Option<Vec<Type>> {
+            types
+                .iter()
+                .map(|ty| match ty {
+                    Type::Scalar(scalar) => Some(Type::Scalar(scalar.with_nullability(true))),
+                    Type::Tuple(_) | Type::Relation(_) | Type::Unit => None,
+                })
+                .collect()
+        };
+        let expected = match kind {
+            super::JoinKind::Inner | super::JoinKind::Cross => {
+                let mut expected = left_types;
+                expected.extend(right_types);
+                Some(expected)
+            }
+            super::JoinKind::Left => nullable(&right_types).map(|right| {
+                let mut expected = left_types;
+                expected.extend(right);
+                expected
+            }),
+            super::JoinKind::Right => nullable(&left_types).map(|mut left| {
+                left.extend(right_types);
+                left
+            }),
+            super::JoinKind::Full => nullable(&left_types).and_then(|mut left| {
+                nullable(&right_types).map(|right| {
+                    left.extend(right);
+                    left
+                })
+            }),
+            super::JoinKind::Semi | super::JoinKind::Anti => Some(left_types),
+        };
+        let Some(expected) = expected else {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "outer joins can null-extend only scalar row fields",
+            );
+            return;
+        };
+        if output.field_types() != expected {
+            self.error(
+                VerificationLocation::Operation(operation_id),
+                "join result fields must positionally match its null-extended input rows",
+            );
+        }
     }
 
     fn verify_yield(&mut self, block_id: BlockId, expectation: YieldExpectation) {
@@ -1271,11 +1772,38 @@ impl Verifier<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct AggregateDependencies {
+    contains_aggregate: bool,
+    contains_window: bool,
+    unaggregated_row: bool,
+}
+
+impl AggregateDependencies {
+    const fn union(self, other: Self) -> Self {
+        Self {
+            contains_aggregate: self.contains_aggregate || other.contains_aggregate,
+            contains_window: self.contains_window || other.contains_window,
+            unaggregated_row: self.unaggregated_row || other.unaggregated_row,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum YieldExpectation {
     Boolean,
     Schema(SchemaId),
     Count(usize),
+}
+
+const fn window_bound_rank(bound: WindowFrameBound) -> u8 {
+    match bound {
+        WindowFrameBound::UnboundedPreceding => 0,
+        WindowFrameBound::Preceding => 1,
+        WindowFrameBound::CurrentRow => 2,
+        WindowFrameBound::Following => 3,
+        WindowFrameBound::UnboundedFollowing => 4,
+    }
 }
 
 fn binary_returns_boolean(operator: BinaryOperator) -> bool {

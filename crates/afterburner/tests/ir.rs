@@ -1,8 +1,10 @@
 use afterburner::ir::{
     AttachmentError, Attribute, BinaryOperator, BlockId, EditError, EffectSet, Field, FunctionRef,
-    Literal, LogicalOp, Module, OperationId, OperationKind, OperationSpec, ProfileSiteId, RegionId,
-    ScalarOp, Schema, SourceSpan, SqlType, TerminatorOp, Type, ValueId, VerificationLocation,
-    Volatility, WalkOrder, collect_operations, structural_fingerprint, verify_module,
+    JoinKind, Literal, LogicalOp, Module, NullOrder, OperationId, OperationKind, OperationSpec,
+    ProfileSiteId, RegionId, ScalarOp, Schema, SortDirection, SortKey, SourceSpan, SqlType,
+    TerminatorOp, Type, ValueId, VerificationLocation, Volatility, WalkOrder, WindowFrame,
+    WindowFrameBound, WindowFrameUnit, WindowSpec, collect_operations, structural_fingerprint,
+    verify_module,
 };
 
 #[derive(Debug)]
@@ -489,9 +491,246 @@ fn verifier_requires_unique_profile_sites() {
     }));
 }
 
-/// Builds `scan -> limit -> return` where each requested count is a
-/// parameter operand of the given scalar type.
-fn build_limit_module(has_offset: bool, has_fetch: bool, count_type: Type) -> Module {
+#[test]
+fn verifier_requires_join_results_to_match_positional_join_semantics() {
+    let mut module = Module::new();
+    let root = module.root_block();
+    let join = {
+        let mut editor = module.editor();
+        let schema = editor.intern_schema(Schema::new(vec![Field::new("id", i64_type())]));
+        let relation = Type::relation(schema);
+        let mut scans = Vec::new();
+        for table in ["left_items", "right_items"] {
+            let scan = editor
+                .append_operation(
+                    root,
+                    OperationSpec::new(LogicalOp::Scan {
+                        table: afterburner::ir::TableRef::new(table),
+                        columns: vec!["id".into()],
+                    })
+                    .with_result(relation.clone()),
+                )
+                .unwrap();
+            scans.push(editor.result(scan, 0).unwrap());
+        }
+        let join = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Join {
+                    kind: JoinKind::Inner,
+                    has_condition: false,
+                })
+                .with_operands(scans)
+                // An inner join must return the left and right rows, but this
+                // deliberately reuses the one-column input schema.
+                .with_result(relation),
+            )
+            .unwrap();
+        let joined = editor.result(join, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![joined]),
+            )
+            .unwrap();
+        join
+    };
+
+    let errors = verify_module(&module).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.location() == VerificationLocation::Operation(join)
+            && error.message().contains("null-extended input rows")
+    }));
+}
+
+fn module_with_misplaced_scalar(scalar: ScalarOp) -> (Module, OperationId) {
+    let mut module = Module::new();
+    let root = module.root_block();
+    let scalar_operation = {
+        let mut editor = module.editor();
+        let schema = editor.intern_schema(Schema::new(vec![Field::new("id", i64_type())]));
+        let relation = Type::relation(schema);
+        let scan = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Scan {
+                    table: afterburner::ir::TableRef::new("items"),
+                    columns: vec!["id".into()],
+                })
+                .with_result(relation.clone()),
+            )
+            .unwrap();
+        let input = editor.result(scan, 0).unwrap();
+        let project = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Project)
+                    .with_operands(vec![input])
+                    .with_result(relation),
+            )
+            .unwrap();
+        let region = editor.add_region(project).unwrap();
+        let block = editor.append_block(region, vec![i64_type()]).unwrap();
+        let argument = editor.block_argument(block, 0).unwrap();
+        let scalar_operation = editor
+            .append_operation(
+                block,
+                OperationSpec::new(scalar)
+                    .with_operands(vec![argument])
+                    .with_result(i64_type()),
+            )
+            .unwrap();
+        let value = editor.result(scalar_operation, 0).unwrap();
+        editor
+            .append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![value]),
+            )
+            .unwrap();
+        let projected = editor.result(project, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![projected]),
+            )
+            .unwrap();
+        scalar_operation
+    };
+    (module, scalar_operation)
+}
+
+#[test]
+fn verifier_restricts_aggregate_and_window_calls_to_their_regions() {
+    let cases = [
+        (
+            ScalarOp::AggregateCall {
+                function: FunctionRef::new("sum"),
+                distinct: false,
+                volatility: Volatility::Immutable,
+                effects: EffectSet::PURE,
+            },
+            "aggregate calls are valid only inside an aggregate region",
+        ),
+        (
+            ScalarOp::WindowCall {
+                function: FunctionRef::new("lag"),
+                argument_count: 1,
+                window: WindowSpec::global(),
+                volatility: Volatility::Immutable,
+                effects: EffectSet::PURE,
+            },
+            "window calls are valid only inside a window region",
+        ),
+    ];
+
+    for (scalar, message) in cases {
+        let (module, operation) = module_with_misplaced_scalar(scalar);
+        let errors = verify_module(&module).unwrap_err();
+        assert!(errors.iter().any(|error| {
+            error.location() == VerificationLocation::Operation(operation)
+                && error.message() == message
+        }));
+    }
+}
+
+#[test]
+fn verifier_rejects_invalid_window_frame_boundaries_and_modes() {
+    let mut module = Module::new();
+    let root = module.root_block();
+    let window_call = {
+        let mut editor = module.editor();
+        let schema = editor.intern_schema(Schema::new(vec![Field::new("id", i64_type())]));
+        let relation = Type::relation(schema);
+        let scan = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Scan {
+                    table: afterburner::ir::TableRef::new("items"),
+                    columns: vec!["id".into()],
+                })
+                .with_result(relation.clone()),
+            )
+            .unwrap();
+        let input = editor.result(scan, 0).unwrap();
+        let window = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Window)
+                    .with_operands(vec![input])
+                    .with_result(relation),
+            )
+            .unwrap();
+        let region = editor.add_region(window).unwrap();
+        let block = editor.append_block(region, vec![i64_type()]).unwrap();
+        let id = editor.block_argument(block, 0).unwrap();
+        let offset = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::Literal(Literal::Integer(1))).with_result(i64_type()),
+            )
+            .unwrap();
+        let offset = editor.result(offset, 0).unwrap();
+        let specification = WindowSpec::new(1, Vec::new()).with_frame(WindowFrame::new(
+            WindowFrameUnit::Groups,
+            WindowFrameBound::Following,
+        ));
+        let window_call = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::WindowCall {
+                    function: FunctionRef::new("row_number"),
+                    argument_count: 0,
+                    window: specification,
+                    volatility: Volatility::Immutable,
+                    effects: EffectSet::PURE,
+                })
+                // Partition key followed by the start-bound offset.
+                .with_operands(vec![id, offset])
+                .with_result(i64_type()),
+            )
+            .unwrap();
+        let ordinal = editor.result(window_call, 0).unwrap();
+        editor
+            .append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![ordinal]),
+            )
+            .unwrap();
+        let result = editor.result(window, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![result]),
+            )
+            .unwrap();
+        window_call
+    };
+
+    let errors = verify_module(&module).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.location() == VerificationLocation::Operation(window_call)
+            && error.message().contains("end cannot precede")
+    }));
+    assert!(errors.iter().any(|error| {
+        error.location() == VerificationLocation::Operation(window_call)
+            && error.message().contains("GROUPS frames require")
+    }));
+}
+
+#[test]
+fn window_spec_preserves_ordering_metadata() {
+    let specification = WindowSpec::new(
+        2,
+        vec![SortKey::new(SortDirection::Descending, NullOrder::First)],
+    );
+    assert_eq!(specification.partition_key_count(), 2);
+    assert_eq!(
+        specification.order_keys(),
+        [SortKey::new(SortDirection::Descending, NullOrder::First,)]
+    );
+}
+
+fn window_fingerprint_module(direction: SortDirection) -> Module {
     let mut module = Module::new();
     let root = module.root_block();
     {
@@ -508,36 +747,47 @@ fn build_limit_module(has_offset: bool, has_fetch: bool, count_type: Type) -> Mo
                 .with_result(relation.clone()),
             )
             .unwrap();
-        let mut operands = vec![editor.result(scan, 0).unwrap()];
-        for position in 0..u32::from(has_offset) + u32::from(has_fetch) {
-            let parameter = editor
-                .append_operation(
-                    root,
-                    OperationSpec::new(ScalarOp::Parameter {
-                        position,
-                        name: None,
-                    })
-                    .with_result(count_type.clone()),
-                )
-                .unwrap();
-            operands.push(editor.result(parameter, 0).unwrap());
-        }
-        let limit = editor
+        let input = editor.result(scan, 0).unwrap();
+        let window = editor
             .append_operation(
                 root,
-                OperationSpec::new(LogicalOp::Limit {
-                    has_offset,
-                    has_fetch,
-                })
-                .with_operands(operands)
-                .with_result(relation),
+                OperationSpec::new(LogicalOp::Window)
+                    .with_operands(vec![input])
+                    .with_result(relation),
             )
             .unwrap();
-        let limited = editor.result(limit, 0).unwrap();
+        let region = editor.add_region(window).unwrap();
+        let block = editor.append_block(region, vec![i64_type()]).unwrap();
+        let id = editor.block_argument(block, 0).unwrap();
+        let call = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::WindowCall {
+                    function: FunctionRef::new("row_number"),
+                    argument_count: 0,
+                    window: WindowSpec::new(
+                        0,
+                        vec![SortKey::new(direction, NullOrder::DialectDefault)],
+                    ),
+                    volatility: Volatility::Immutable,
+                    effects: EffectSet::PURE,
+                })
+                .with_operands(vec![id])
+                .with_result(i64_type()),
+            )
+            .unwrap();
+        let ordinal = editor.result(call, 0).unwrap();
+        editor
+            .append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![ordinal]),
+            )
+            .unwrap();
+        let result = editor.result(window, 0).unwrap();
         editor
             .append_operation(
                 root,
-                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![limited]),
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![result]),
             )
             .unwrap();
     }
@@ -545,60 +795,12 @@ fn build_limit_module(has_offset: bool, has_fetch: bool, count_type: Type) -> Mo
 }
 
 #[test]
-fn limit_accepts_parameter_count_operands() {
-    for (has_offset, has_fetch) in [(false, true), (true, false), (true, true)] {
-        let module = build_limit_module(has_offset, has_fetch, i64_type());
-        verify_module(&module).unwrap_or_else(|errors| {
-            panic!("limit(offset: {has_offset}, fetch: {has_fetch}) must verify: {errors:?}")
-        });
-    }
-}
+fn fingerprints_include_window_specification_metadata() {
+    let ascending = window_fingerprint_module(SortDirection::Ascending);
+    let descending = window_fingerprint_module(SortDirection::Descending);
 
-#[test]
-fn limit_requires_at_least_one_count() {
-    let module = build_limit_module(false, false, i64_type());
-    let errors = verify_module(&module).unwrap_err();
-    assert!(
-        errors
-            .iter()
-            .any(|error| error.message().contains("offset, fetch count, or both"))
+    assert_ne!(
+        structural_fingerprint(&ascending).unwrap(),
+        structural_fingerprint(&descending).unwrap()
     );
-}
-
-#[test]
-fn limit_rejects_non_integer_and_nullable_counts() {
-    let text = Type::scalar(SqlType::Utf8, false);
-    let errors = verify_module(&build_limit_module(false, true, text)).unwrap_err();
-    assert!(
-        errors
-            .iter()
-            .any(|error| error.message().contains("non-nullable integers"))
-    );
-
-    let nullable = Type::scalar(
-        SqlType::Integer {
-            bits: 64,
-            signed: true,
-        },
-        true,
-    );
-    let errors = verify_module(&build_limit_module(false, true, nullable)).unwrap_err();
-    assert!(
-        errors
-            .iter()
-            .any(|error| error.message().contains("non-nullable integers"))
-    );
-}
-
-#[test]
-fn limit_fingerprint_depends_on_operand_presence_not_values() {
-    // Two identical parameterized shapes share one fingerprint; the bound
-    // values live outside the IR entirely.
-    let first = structural_fingerprint(&build_limit_module(false, true, i64_type())).unwrap();
-    let second = structural_fingerprint(&build_limit_module(false, true, i64_type())).unwrap();
-    assert_eq!(first, second);
-
-    // Presence flags are structural and must distinguish shapes.
-    let offset_only = structural_fingerprint(&build_limit_module(true, false, i64_type())).unwrap();
-    assert_ne!(first, offset_only);
 }

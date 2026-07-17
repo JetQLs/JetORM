@@ -9,6 +9,8 @@ use crate::error::RenderError;
 use crate::postgres::quote_identifier;
 use crate::postgres::types::type_name;
 
+mod window;
+
 /// Nanoseconds in one 24-hour day.
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 
@@ -43,6 +45,11 @@ impl ParamMap {
 /// Row-lambda context mapping block arguments onto FROM-item columns.
 pub(crate) struct RowScope<'a> {
     block: BlockId,
+    first: RowSource<'a>,
+    second: Option<RowSource<'a>>,
+}
+
+struct RowSource<'a> {
     alias: &'a str,
     columns: &'a [String],
 }
@@ -51,9 +58,40 @@ impl<'a> RowScope<'a> {
     pub(crate) const fn new(block: BlockId, alias: &'a str, columns: &'a [String]) -> Self {
         Self {
             block,
-            alias,
-            columns,
+            first: RowSource { alias, columns },
+            second: None,
         }
+    }
+
+    pub(crate) const fn joined(
+        block: BlockId,
+        left_alias: &'a str,
+        left_columns: &'a [String],
+        right_alias: &'a str,
+        right_columns: &'a [String],
+    ) -> Self {
+        Self {
+            block,
+            first: RowSource {
+                alias: left_alias,
+                columns: left_columns,
+            },
+            second: Some(RowSource {
+                alias: right_alias,
+                columns: right_columns,
+            }),
+        }
+    }
+
+    fn column(&self, index: usize) -> Option<(&str, &str)> {
+        if let Some(column) = self.first.columns.get(index) {
+            return Some((self.first.alias, column));
+        }
+        let second = self.second.as_ref()?;
+        second
+            .columns
+            .get(index.checked_sub(self.first.columns.len())?)
+            .map(|column| (second.alias, column.as_str()))
     }
 }
 
@@ -79,12 +117,12 @@ pub(crate) fn render_value(
                     "expression captures a value from an enclosing region",
                 ));
             }
-            let column = scope.columns.get(index as usize).ok_or_else(|| {
+            let (alias, column) = scope.column(index as usize).ok_or_else(|| {
                 RenderError::inconsistent(format!("block argument {index} has no source column"))
             })?;
             Ok(format!(
                 "{}.{}",
-                quote_identifier(scope.alias)?,
+                quote_identifier(alias)?,
                 quote_identifier(column)?
             ))
         }
@@ -181,20 +219,46 @@ fn render_scalar_op(
             Ok(sql)
         }
         ScalarOp::Call { function, .. } => {
-            let mut arguments = Vec::with_capacity(operands.len());
-            for operand in operands {
-                arguments.push(render_value(module, params, scope, *operand)?);
-            }
-            Ok(format!(
-                "{}({})",
-                function_name(function)?,
-                arguments.join(", ")
-            ))
+            render_function_call(module, params, scope, function, operands, false)
         }
-        ScalarOp::AggregateCall { .. } | ScalarOp::WindowCall { .. } => Err(
-            RenderError::unsupported("aggregate and window calls are not rendered yet"),
+        ScalarOp::AggregateCall {
+            function, distinct, ..
+        } => render_function_call(module, params, scope, function, operands, *distinct),
+        ScalarOp::WindowCall {
+            function,
+            argument_count,
+            window,
+            ..
+        } => window::render_window_call(
+            module,
+            params,
+            scope,
+            function,
+            *argument_count,
+            window,
+            operands,
         ),
     }
+}
+
+fn render_function_call(
+    module: &Module,
+    params: &mut ParamMap,
+    scope: &RowScope<'_>,
+    function: &FunctionRef,
+    operands: &[ValueId],
+    distinct: bool,
+) -> Result<String, RenderError> {
+    let mut arguments = Vec::with_capacity(operands.len());
+    for operand in operands {
+        arguments.push(render_value(module, params, scope, *operand)?);
+    }
+    let distinct = if distinct { "DISTINCT " } else { "" };
+    Ok(format!(
+        "{}({distinct}{})",
+        function_name(function)?,
+        arguments.join(", ")
+    ))
 }
 
 fn operand_sql(

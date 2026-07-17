@@ -33,6 +33,6 @@ mod value;
 pub use entity::{Column, Entity, KeyedEntity, Model, NonNullColumn, SingleKeyEntity};
 pub use error::{DecodeError, ValueTypeMismatch};
 pub use json::Json;
-pub use meta::{ColumnMeta, ColumnType, TableMeta};
+pub use meta::{ColumnMeta, ColumnType, ElementType, TableMeta};
 pub use relation::{EnumMeta, ForeignKeyMeta, ForeignKeyRef, Inverse, ReferentialAction, Relation};
 pub use value::{SqlValue, Value};

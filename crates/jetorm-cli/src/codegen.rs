@@ -163,11 +163,11 @@ fn write_column(
     for attribute in &attributes {
         let _ = writeln!(source, "    #[jet({attribute})]");
     }
-    let rust_type = rust_type_of(column.column_type());
+    let rust_type = field_type_of(column.column_type());
     let field_type = if column.is_nullable() {
         format!("Option<{rust_type}>")
     } else {
-        rust_type.to_owned()
+        rust_type
     };
     let _ = writeln!(source, "    pub {field_name}: {field_type},");
 }
@@ -181,6 +181,13 @@ const fn action_attribute(action: ReferentialAction) -> Option<&'static str> {
         ReferentialAction::SetDefault => Some("set_default"),
         _ => None,
     }
+}
+
+fn field_type_of(column_type: ColumnType) -> String {
+    if let ColumnType::ArrayOf(element) = column_type {
+        return format!("Vec<{}>", rust_type_of(element.as_column_type()));
+    }
+    rust_type_of(column_type).to_owned()
 }
 
 const fn rust_type_of(column_type: ColumnType) -> &'static str {
@@ -200,6 +207,9 @@ const fn rust_type_of(column_type: ColumnType) -> &'static str {
         ColumnType::TimestampUtc => "chrono::DateTime<chrono::Utc>",
         ColumnType::Uuid => "uuid::Uuid",
         ColumnType::Json => "serde_json::Value",
+        // Reached only through scalar element mapping; arrays route
+        // through field_type_of.
+        ColumnType::ArrayOf(_) => "unreachable",
     }
 }
 

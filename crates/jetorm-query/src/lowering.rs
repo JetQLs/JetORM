@@ -1475,5 +1475,8 @@ fn sql_type(column_type: ColumnType) -> SqlType {
         },
         ColumnType::Uuid => SqlType::Uuid,
         ColumnType::Json => SqlType::Json,
+        ColumnType::ArrayOf(element) => SqlType::Array {
+            element: Box::new(sql_type(element.as_column_type())),
+        },
     }
 }

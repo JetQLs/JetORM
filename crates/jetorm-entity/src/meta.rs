@@ -47,7 +47,10 @@ impl TableMeta {
 /// The type is deliberately exhaustive: downstream code matching on it should
 /// stop compiling when JetORM learns a new type, rather than silently taking
 /// a fallback branch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// Serialized as its variant name, with arrays spelled `"Element[]"` — the
+/// form migration TOML files use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ColumnType {
     /// SQL boolean.
     Boolean,
@@ -80,6 +83,176 @@ pub enum ColumnType {
     Uuid,
     /// Structured JSON document.
     Json,
+    /// Array of one scalar element type.
+    ///
+    /// Deliberately flat: the element enum names only scalars, so arrays
+    /// never nest — matching what entity fields can express (`Vec<T>` of
+    /// a scalar `T`).
+    ArrayOf(ElementType),
+}
+
+/// Scalar element types an array column can hold.
+///
+/// Bytes and JSON are absent: `Vec<u8>` already is the bytes column, and
+/// JSON documents hold their own arrays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ElementType {
+    /// SQL boolean.
+    Boolean,
+    /// 16-bit signed integer.
+    Int16,
+    /// 32-bit signed integer.
+    Int32,
+    /// 64-bit signed integer.
+    Int64,
+    /// 32-bit IEEE floating point.
+    Float32,
+    /// 64-bit IEEE floating point.
+    Float64,
+    /// Exact arbitrary-precision decimal.
+    Decimal,
+    /// Unicode text.
+    Text,
+    /// Calendar date without a time zone.
+    Date,
+    /// Time of day without a date, microsecond precision.
+    Time,
+    /// Date and time without time-zone semantics, microsecond precision.
+    Timestamp,
+    /// Date and time in Coordinated Universal Time, microsecond precision.
+    TimestampUtc,
+    /// Universally unique identifier.
+    Uuid,
+}
+
+impl ElementType {
+    /// Returns the element's own column type.
+    #[must_use]
+    pub const fn as_column_type(self) -> ColumnType {
+        match self {
+            Self::Boolean => ColumnType::Boolean,
+            Self::Int16 => ColumnType::Int16,
+            Self::Int32 => ColumnType::Int32,
+            Self::Int64 => ColumnType::Int64,
+            Self::Float32 => ColumnType::Float32,
+            Self::Float64 => ColumnType::Float64,
+            Self::Decimal => ColumnType::Decimal,
+            Self::Text => ColumnType::Text,
+            Self::Date => ColumnType::Date,
+            Self::Time => ColumnType::Time,
+            Self::Timestamp => ColumnType::Timestamp,
+            Self::TimestampUtc => ColumnType::TimestampUtc,
+            Self::Uuid => ColumnType::Uuid,
+        }
+    }
+
+    /// Returns the element's serialized spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "Boolean",
+            Self::Int16 => "Int16",
+            Self::Int32 => "Int32",
+            Self::Int64 => "Int64",
+            Self::Float32 => "Float32",
+            Self::Float64 => "Float64",
+            Self::Decimal => "Decimal",
+            Self::Text => "Text",
+            Self::Date => "Date",
+            Self::Time => "Time",
+            Self::Timestamp => "Timestamp",
+            Self::TimestampUtc => "TimestampUtc",
+            Self::Uuid => "Uuid",
+        }
+    }
+
+    /// Parses the serialized spelling produced by [`Self::name`].
+    #[must_use]
+    fn parse(spelling: &str) -> Option<Self> {
+        Some(match spelling {
+            "Boolean" => Self::Boolean,
+            "Int16" => Self::Int16,
+            "Int32" => Self::Int32,
+            "Int64" => Self::Int64,
+            "Float32" => Self::Float32,
+            "Float64" => Self::Float64,
+            "Decimal" => Self::Decimal,
+            "Text" => Self::Text,
+            "Date" => Self::Date,
+            "Time" => Self::Time,
+            "Timestamp" => Self::Timestamp,
+            "TimestampUtc" => Self::TimestampUtc,
+            "Uuid" => Self::Uuid,
+            _ => return None,
+        })
+    }
+}
+
+impl ColumnType {
+    /// Returns the serialized spelling: the variant name, with arrays as
+    /// `"Element[]"`.
+    #[must_use]
+    pub fn spelling(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        Cow::Borrowed(match self {
+            Self::Boolean => "Boolean",
+            Self::Int16 => "Int16",
+            Self::Int32 => "Int32",
+            Self::Int64 => "Int64",
+            Self::Float32 => "Float32",
+            Self::Float64 => "Float64",
+            Self::Decimal => "Decimal",
+            Self::Text => "Text",
+            Self::Bytes => "Bytes",
+            Self::Date => "Date",
+            Self::Time => "Time",
+            Self::Timestamp => "Timestamp",
+            Self::TimestampUtc => "TimestampUtc",
+            Self::Uuid => "Uuid",
+            Self::Json => "Json",
+            Self::ArrayOf(element) => {
+                return Cow::Owned(format!("{}[]", element.name()));
+            }
+        })
+    }
+
+    fn parse(spelling: &str) -> Option<Self> {
+        if let Some(base) = spelling.strip_suffix("[]") {
+            return ElementType::parse(base).map(Self::ArrayOf);
+        }
+        Some(match spelling {
+            "Boolean" => Self::Boolean,
+            "Int16" => Self::Int16,
+            "Int32" => Self::Int32,
+            "Int64" => Self::Int64,
+            "Float32" => Self::Float32,
+            "Float64" => Self::Float64,
+            "Decimal" => Self::Decimal,
+            "Text" => Self::Text,
+            "Bytes" => Self::Bytes,
+            "Date" => Self::Date,
+            "Time" => Self::Time,
+            "Timestamp" => Self::Timestamp,
+            "TimestampUtc" => Self::TimestampUtc,
+            "Uuid" => Self::Uuid,
+            "Json" => Self::Json,
+            _ => return None,
+        })
+    }
+}
+
+impl serde::Serialize for ColumnType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.spelling())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ColumnType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let spelling = <std::borrow::Cow<'_, str>>::deserialize(deserializer)?;
+        Self::parse(&spelling)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown column type `{spelling}`")))
+    }
 }
 
 /// Static description of one entity column.

@@ -42,6 +42,27 @@ pub struct Introspection {
 
 /// Maps a PostgreSQL type name onto JetORM's column type.
 fn column_type_of(udt_name: &str) -> Option<ColumnType> {
+    use jetorm_entity::ElementType;
+    // The catalog spells array types with a leading underscore.
+    if let Some(base) = udt_name.strip_prefix('_') {
+        let element = match base {
+            "bool" => ElementType::Boolean,
+            "int2" => ElementType::Int16,
+            "int4" => ElementType::Int32,
+            "int8" => ElementType::Int64,
+            "float4" => ElementType::Float32,
+            "float8" => ElementType::Float64,
+            "numeric" => ElementType::Decimal,
+            "text" | "varchar" | "bpchar" => ElementType::Text,
+            "date" => ElementType::Date,
+            "time" => ElementType::Time,
+            "timestamp" => ElementType::Timestamp,
+            "timestamptz" => ElementType::TimestampUtc,
+            "uuid" => ElementType::Uuid,
+            _ => return None,
+        };
+        return Some(ColumnType::ArrayOf(element));
+    }
     Some(match udt_name {
         "bool" => ColumnType::Boolean,
         "int2" => ColumnType::Int16,

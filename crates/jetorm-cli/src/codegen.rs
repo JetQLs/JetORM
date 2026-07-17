@@ -42,17 +42,100 @@ pub fn entities_source(schema: &SchemaSet) -> GeneratedEntities {
          use jetorm::prelude::*;\n",
     );
     let mut warnings = Vec::new();
+    let enum_types = write_enums(&mut source, schema, &mut warnings);
     for table in schema.tables() {
         source.push('\n');
-        write_table(&mut source, schema, table, &mut warnings);
+        write_table(&mut source, schema, table, &enum_types, &mut warnings);
     }
     GeneratedEntities { source, warnings }
+}
+
+/// Renders every native enum type as a `JetEnum` and returns the mapping
+/// from database type name to generated Rust type name.
+///
+/// An enum whose labels cannot become distinct Rust identifiers is skipped
+/// with a warning; its columns fall back to `String`, which reads and
+/// writes the same stored text without the typed surface.
+fn write_enums(
+    source: &mut String,
+    schema: &SchemaSet,
+    warnings: &mut Vec<String>,
+) -> std::collections::BTreeMap<String, String> {
+    // Struct names are claimed by tables; an enum type named like a table
+    // (or another enum after casing) must take a distinct spelling.
+    let mut claimed: BTreeSet<String> = schema
+        .tables()
+        .map(|table| pascal_case(table.name().name()))
+        .collect();
+    let mut enum_types = std::collections::BTreeMap::new();
+    for (name, variants) in schema.enums() {
+        let mut rust_name = pascal_case(name);
+        if !valid_identifier(&rust_name) {
+            warnings.push(format!(
+                "enum type {name:?} has no Rust spelling; its columns fall \
+                 back to String"
+            ));
+            continue;
+        }
+        if claimed.contains(&rust_name) {
+            rust_name.push_str("Enum");
+        }
+        let mut idents = Vec::with_capacity(variants.len());
+        let mut seen = BTreeSet::new();
+        for label in variants {
+            let ident = pascal_case(label);
+            if !valid_identifier(&ident) || !seen.insert(ident.clone()) {
+                warnings.push(format!(
+                    "enum type {name:?}: label {label:?} has no distinct Rust \
+                     spelling; the type falls back to String columns"
+                ));
+                idents.clear();
+                break;
+            }
+            idents.push(ident);
+        }
+        if idents.is_empty() {
+            continue;
+        }
+        claimed.insert(rust_name.clone());
+        source.push('\n');
+        let _ = writeln!(source, "/// Values of the `{name}` enum type.");
+        let _ = writeln!(
+            source,
+            "#[derive(Clone, Copy, Debug, PartialEq, Eq, JetEnum)]"
+        );
+        let _ = writeln!(source, "#[jet(native = \"{name}\")]");
+        let _ = writeln!(source, "pub enum {rust_name} {{");
+        for (label, ident) in variants.iter().zip(&idents) {
+            // The derive stores the snake_case of the variant name; a label
+            // that spelling would not reproduce keeps its exact text.
+            if snake_case(ident) != *label {
+                let _ = writeln!(source, "    #[jet(rename = \"{label}\")]");
+            }
+            let _ = writeln!(source, "    {ident},");
+        }
+        source.push_str("}\n");
+        enum_types.insert(name.to_owned(), rust_name);
+    }
+    enum_types
+}
+
+/// Whether the generated name is usable as a Rust identifier.
+fn valid_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && characters.all(|character| character.is_alphanumeric() || character == '_')
+        && !RAW_ONLY_KEYWORDS.contains(&name)
+        && !RESERVED_NAMES.contains(&name)
 }
 
 fn write_table(
     source: &mut String,
     schema: &SchemaSet,
     table: &TableDef,
+    enum_types: &std::collections::BTreeMap<String, String>,
     warnings: &mut Vec<String>,
 ) {
     let struct_name = pascal_case(table.name().name());
@@ -78,17 +161,27 @@ fn write_table(
         .map(|column| pascal_case(column.name()))
         .collect();
     for column in table.columns() {
-        write_column(source, schema, table, column, &claimed_markers, warnings);
+        write_column(
+            source,
+            schema,
+            table,
+            column,
+            &claimed_markers,
+            enum_types,
+            warnings,
+        );
     }
     source.push_str("}\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_column(
     source: &mut String,
     schema: &SchemaSet,
     table: &TableDef,
     column: &ColumnDef,
     claimed_markers: &BTreeSet<String>,
+    enum_types: &std::collections::BTreeMap<String, String>,
     warnings: &mut Vec<String>,
 ) {
     let mut attributes = Vec::new();
@@ -163,7 +256,25 @@ fn write_column(
     for attribute in &attributes {
         let _ = writeln!(source, "    #[jet({attribute})]");
     }
-    let rust_type = field_type_of(column.column_type());
+    let rust_type = match column.type_name() {
+        Some(type_name) => match enum_types.get(type_name) {
+            Some(enum_type) => enum_type.clone(),
+            None => {
+                // The enum had no Rust spelling; the stored text still
+                // reads and writes, but the field loses the type name and
+                // a later generate will see the difference.
+                warnings.push(format!(
+                    "{}.{}: enum type {type_name:?} was not generated; the \
+                     field is a plain String and will diff against the \
+                     database until the labels get Rust spellings",
+                    table.name(),
+                    column.name()
+                ));
+                field_type_of(column.column_type())
+            }
+        },
+        None => field_type_of(column.column_type()),
+    };
     let field_type = if column.is_nullable() {
         format!("Option<{rust_type}>")
     } else {
@@ -217,7 +328,9 @@ fn pascal_case(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut upper_next = true;
     for character in input.chars() {
-        if character == '_' {
+        // Any separator — `_` in identifiers, `-` or spaces in enum
+        // labels — starts a new word and vanishes from the spelling.
+        if !character.is_alphanumeric() {
             upper_next = true;
         } else if upper_next {
             output.extend(character.to_uppercase());
@@ -242,4 +355,98 @@ fn snake_case(input: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jetorm_schema::TableName;
+
+    fn schema_with_enum() -> SchemaSet {
+        let mut schema = SchemaSet::new();
+        schema.insert_enum(
+            "post_status",
+            ["draft", "in-review", "published"].map(str::to_owned),
+        );
+        schema.insert(
+            TableDef::new(TableName::new("posts"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_column(
+                    ColumnDef::new("status", ColumnType::Text).with_type_name("post_status"),
+                )
+                .with_primary_key(["id".to_owned()]),
+        );
+        schema
+    }
+
+    #[test]
+    fn enums_generate_jet_enum_types_and_typed_fields() {
+        let generated = entities_source(&schema_with_enum());
+        for expected in [
+            "#[jet(native = \"post_status\")]",
+            "pub enum PostStatus {",
+            "    Draft,",
+            "#[jet(rename = \"in-review\")]",
+            "    InReview,",
+            "    Published,",
+            "pub status: PostStatus,",
+        ] {
+            assert!(
+                generated.source.contains(expected),
+                "generated source lacks {expected:?}:\n{}",
+                generated.source
+            );
+        }
+        // `draft` and `published` reproduce from their variant names, so
+        // only the dashed label needs an explicit stored name.
+        assert_eq!(generated.source.matches("rename").count(), 1);
+        assert!(generated.warnings.is_empty(), "{:?}", generated.warnings);
+    }
+
+    #[test]
+    fn an_enum_named_like_a_table_takes_a_distinct_spelling() {
+        let mut schema = schema_with_enum();
+        schema.insert_enum("posts", ["a", "b"].map(str::to_owned));
+        schema.insert(
+            TableDef::new(TableName::new("labels"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_column(ColumnDef::new("kind", ColumnType::Text).with_type_name("posts"))
+                .with_primary_key(["id".to_owned()]),
+        );
+        let generated = entities_source(&schema);
+        assert!(
+            generated.source.contains("pub enum PostsEnum {"),
+            "the table keeps the plain name:\n{}",
+            generated.source
+        );
+        assert!(generated.source.contains("pub kind: PostsEnum,"));
+    }
+
+    #[test]
+    fn unrepresentable_labels_fall_back_to_string_with_a_warning() {
+        let mut schema = SchemaSet::new();
+        // Both labels case to the same identifier — no distinct spelling.
+        schema.insert_enum("clash", ["draft", "Draft"].map(str::to_owned));
+        schema.insert(
+            TableDef::new(TableName::new("posts"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_column(ColumnDef::new("state", ColumnType::Text).with_type_name("clash"))
+                .with_primary_key(["id".to_owned()]),
+        );
+        let generated = entities_source(&schema);
+        assert!(
+            !generated.source.contains("pub enum"),
+            "no enum should generate:\n{}",
+            generated.source
+        );
+        assert!(generated.source.contains("pub state: String,"));
+        assert!(
+            generated
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("clash")),
+            "the fallback is reported: {:?}",
+            generated.warnings
+        );
+    }
 }

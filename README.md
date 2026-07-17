@@ -40,7 +40,8 @@ pub struct Post {
 }
 ```
 
-String-backed enums and typed JSON need no annotation on the field:
+String-backed enums, typed JSON, and array columns need no annotation
+on the field:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, JetEnum)]
@@ -48,6 +49,25 @@ pub enum Status { Draft, #[jet(rename = "live")] Published }
 
 pub struct Prefs { /* any Serialize + Deserialize type */ }
 // ... status: Status, prefs: Json<Prefs> as ordinary fields.
+
+pub tags: Vec<String>,               // text[]  — any scalar element type
+pub scores: Option<Vec<i32>>,        // integer[], the whole array nullable
+```
+
+Arrays are deliberately flat — `Vec<T>` of a scalar `T`, never nested —
+and an empty array is not `NULL`.
+
+**Native enums** — add `#[jet(native = "...")]` and the enum becomes a
+real PostgreSQL `CREATE TYPE ... AS ENUM`: comparisons and `ORDER BY`
+follow declaration order rather than the alphabet, the database rejects
+undeclared values, and migrations evolve the type by appending variants.
+Inside every statement the column is enum-typed; it crosses the driver
+boundary as text, so decoding stays dialect-independent:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, JetEnum)]
+#[jet(native = "article_status")]
+pub enum Status { Draft, #[jet(rename = "live")] Published }
 ```
 
 ## Connecting
@@ -181,7 +201,9 @@ refuses migrations without them.
 $ jet db pull --out src/entities.rs --schema-out schema.toml
 ```
 
-Unmappable columns are reported and skipped, never silently lost.
+Native enum types pull as `JetEnum` definitions with their exact stored
+labels; array columns pull as `Vec<T>` fields. Unmappable columns are
+reported and skipped, never silently lost.
 
 ## Why JetORM
 

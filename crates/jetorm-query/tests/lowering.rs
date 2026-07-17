@@ -80,6 +80,7 @@ struct Id;
 impl Column for Id {
     type Entity = UserEntity;
     type Rust = i64;
+    type Field = i64;
     const INDEX: usize = 0;
     const NULLABLE: bool = false;
 }
@@ -90,6 +91,7 @@ struct Name;
 impl Column for Name {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = String;
     const INDEX: usize = 1;
     const NULLABLE: bool = false;
 }
@@ -100,6 +102,7 @@ struct Email;
 impl Column for Email {
     type Entity = UserEntity;
     type Rust = String;
+    type Field = Option<String>;
     const INDEX: usize = 2;
     const NULLABLE: bool = true;
 }
@@ -121,6 +124,7 @@ fn root_logical_kinds(module: &Module) -> Vec<String> {
                 OperationKind::Logical(LogicalOp::Distinct) => "distinct".to_owned(),
                 OperationKind::Logical(LogicalOp::Sort { .. }) => "sort".to_owned(),
                 OperationKind::Logical(LogicalOp::Limit { .. }) => "limit".to_owned(),
+                OperationKind::Logical(LogicalOp::Project) => "project".to_owned(),
                 OperationKind::Scalar(ScalarOp::Parameter { .. }) => "param".to_owned(),
                 OperationKind::Terminator(TerminatorOp::QueryReturn) => "return".to_owned(),
                 other => format!("{other:?}"),
@@ -305,4 +309,63 @@ fn every_list_length_shares_one_query_shape() {
     assert_eq!(two.shape(), empty.shape());
 
     afterburner!(empty).expect("an empty list still lowers to verified IR");
+}
+
+#[test]
+fn projections_partition_the_query_shape() {
+    let full = UserEntity::find().filter(Id.gt(0));
+    let narrow = UserEntity::find().filter(Id.gt(0)).select((Id, Name));
+    let single = UserEntity::find().filter(Id.gt(0)).select((Name,));
+    assert_ne!(full.shape(), narrow.shape());
+    assert_ne!(narrow.shape(), single.shape());
+    assert_eq!(
+        narrow.shape(),
+        UserEntity::find()
+            .filter(Id.gt(0))
+            .select((Id, Name))
+            .shape(),
+        "equal projections over equal queries share one shape"
+    );
+}
+
+#[test]
+fn projection_lowers_as_a_trailing_project_operation() {
+    let query = UserEntity::find()
+        .filter(Id.gt(0))
+        .order_by(Id.asc())
+        .select((Id, Email))
+        .limit(3)
+        .into_select();
+    let module = afterburner!(query).expect("projected query lowers to verified IR");
+    let kinds = root_logical_kinds(&module);
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("return"),
+        "unexpected tail: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"project".to_owned()),
+        "a projected query must emit Project: {kinds:?}"
+    );
+    // Project comes after limit: filters, sorts, and limits address the
+    // full row, and the SQL renderer fuses everything flat.
+    let project_at = kinds.iter().position(|kind| kind == "project").unwrap();
+    let limit_at = kinds.iter().position(|kind| kind == "limit").unwrap();
+    assert!(limit_at < project_at);
+}
+
+#[test]
+fn distinct_over_a_projection_is_rejected_at_lowering() {
+    use afterburner::IntoAfterBurnerIr;
+    let query = UserEntity::find()
+        .distinct()
+        .select((Id, Name))
+        .into_select();
+    let error = query
+        .into_afterburner_ir()
+        .expect_err("distinct + projection must be rejected");
+    assert!(matches!(
+        error,
+        jetorm_query::LoweringError::DistinctOverProjection
+    ));
 }

@@ -53,19 +53,20 @@ pub use jetorm_entity::{
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
-    Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, JetRow, PlanCache, SelectExecute,
-    Transaction,
+    Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, JetRow, PlanCache,
+    ProjectedExecute, SelectExecute, Transaction,
 };
 pub use jetorm_query::{
-    ColumnExt, EntityQuery, Expr, LoweringError, OrderKey, Select, TextColumnExt,
+    ColumnExt, ColumnList, EntityQuery, Expr, LoweringError, OrderKey, Projected, Select,
+    TextColumnExt,
 };
 
 /// Single-import surface for application code.
 pub mod prelude {
     pub use crate::{
-        Column, ColumnExt, Entity, EntityQuery, Expr, JetModel, Model, OrderKey, Select, SqlValue,
-        TextColumnExt, Value,
+        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, JetModel, Model, OrderKey,
+        Projected, Select, SqlValue, TextColumnExt, Value,
     };
     #[cfg(feature = "executor")]
-    pub use crate::{Database, SelectExecute, Transaction};
+    pub use crate::{Database, ProjectedExecute, SelectExecute, Transaction};
 }

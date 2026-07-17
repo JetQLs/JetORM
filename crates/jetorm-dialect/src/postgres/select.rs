@@ -194,7 +194,13 @@ impl<'module> Renderer<'module> {
             OperationKind::Logical(LogicalOp::Project) => {
                 let input = self.input_relation(operation_id)?;
                 let mut builder = self.build_relation(input)?;
-                if builder.stage >= Stage::Projection {
+                // A SELECT list coexists with WHERE, ORDER BY, and LIMIT in
+                // one query level — PostgreSQL resolves sort keys against
+                // the FROM row, so ordering by an unprojected column stays
+                // valid. Only two cases force a derived table: a projection
+                // already fused (the row shape changed), and DISTINCT
+                // (whose ORDER BY must draw from the select list).
+                if builder.projection.is_some() || builder.distinct {
                     builder = self.wrap(builder)?;
                 }
                 let schema_id = self.result_schema(operation_id)?;
@@ -224,7 +230,9 @@ impl<'module> Renderer<'module> {
                 }
                 builder.projection = Some(projection);
                 builder.columns = output_names;
-                builder.stage = Stage::Projection;
+                // Never lower the stage: a projection fused onto a sorted or
+                // limited query must not reopen earlier clause slots.
+                builder.stage = builder.stage.max(Stage::Projection);
                 Ok(builder)
             }
             OperationKind::Logical(LogicalOp::Distinct) => {

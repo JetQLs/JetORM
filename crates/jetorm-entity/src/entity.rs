@@ -67,6 +67,12 @@ pub trait Column: Copy + 'static {
     /// Non-optional Rust type stored in this column.
     type Rust: SqlValue;
 
+    /// Full Rust type of the model field: `Option<Rust>` when the column is
+    /// nullable, `Rust` otherwise. Projections decode through this type, so
+    /// a projected nullable column comes back as an `Option` rather than a
+    /// panic on NULL.
+    type Field: SqlValue;
+
     /// Position of this column within [`Entity::COLUMNS`].
     const INDEX: usize;
 

@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use jetorm_dialect::Statement;
-use jetorm_entity::{ColumnMeta, ColumnType, SqlValue, Value};
+use jetorm_entity::{ColumnType, SqlValue, Value};
 use sqlx::Row;
 use sqlx::postgres::{PgArguments, PgRow};
 use uuid::Uuid;
@@ -113,14 +113,14 @@ fn bind_null(query: PgQuery<'_>, column_type: ColumnType) -> PgQuery<'_> {
     }
 }
 
-/// Decodes one driver row into positional values in column order.
+/// Decodes one driver row into positional values of the given types.
 pub(crate) fn decode_row(
     row: &PgRow,
-    columns: &'static [ColumnMeta],
+    columns: &[ColumnType],
 ) -> Result<crate::row::JetRow, ExecuteError> {
     let mut values = Vec::with_capacity(columns.len());
-    for (index, column) in columns.iter().enumerate() {
-        values.push(decode_column(row, index, column.column_type())?);
+    for (index, column_type) in columns.iter().enumerate() {
+        values.push(decode_column(row, index, *column_type)?);
     }
     Ok(crate::row::JetRow::new(values))
 }

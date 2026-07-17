@@ -220,6 +220,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let column_markers = columns.iter().enumerate().map(|(index, column)| {
         let marker_ident = &column.marker_ident;
         let inner_ty = &column.spec.inner;
+        let field_ty = &column.field_ty;
         let nullable = column.spec.nullable;
         let doc = format!(
             "Column marker for `{}.{}`.",
@@ -234,6 +235,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             impl #cr::Column for #marker_ident {
                 type Entity = super::#entity_ident;
                 type Rust = #inner_ty;
+                type Field = #field_ty;
                 const INDEX: usize = #index;
                 const NULLABLE: bool = #nullable;
             }

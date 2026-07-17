@@ -65,7 +65,7 @@ pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::{ErrorKind, ExecuteError};
 pub use plan::PlanCache;
 pub use row::JetRow;
-pub use select::SelectExecute;
+pub use select::{ProjectedExecute, SelectExecute};
 
 /// The `sqlx` version JetORM is built against.
 ///

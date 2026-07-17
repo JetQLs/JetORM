@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use jetorm_dialect::Statement;
-use jetorm_entity::{ColumnMeta, Value};
+use jetorm_entity::{ColumnType, Value};
 use sqlx::postgres::{PgConnection, PgPool};
 
 use crate::error::ExecuteError;
@@ -31,7 +31,8 @@ pub trait Executor: sealed::Sealed + Send + Sized {
     fn plan_cache(&self) -> &PlanCache;
 
     /// Fetches every row produced by one bound statement, decoded into
-    /// positional values for the given column layout.
+    /// positional values of the given types — the statement's output
+    /// columns, which a projection may have narrowed below the entity's.
     ///
     /// No driver type crosses this boundary: implementations convert their
     /// native rows into [`JetRow`]s.
@@ -40,7 +41,7 @@ pub trait Executor: sealed::Sealed + Send + Sized {
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-        columns: &'static [ColumnMeta],
+        columns: Vec<ColumnType>,
     ) -> impl Future<Output = Result<Vec<JetRow>, ExecuteError>> + Send;
 }
 
@@ -165,11 +166,11 @@ impl Executor for &Database {
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-        columns: &'static [ColumnMeta],
+        columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
         let query = build_query(&statement, &binds)?;
         let rows = query.fetch_all(&self.pool).await?;
-        rows.iter().map(|row| decode_row(row, columns)).collect()
+        rows.iter().map(|row| decode_row(row, &columns)).collect()
     }
 }
 
@@ -225,10 +226,10 @@ impl Executor for &mut Transaction<'_> {
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-        columns: &'static [ColumnMeta],
+        columns: Vec<ColumnType>,
     ) -> Result<Vec<JetRow>, ExecuteError> {
         let query = build_query(&statement, &binds)?;
         let rows = query.fetch_all(&mut *self.inner).await?;
-        rows.iter().map(|row| decode_row(row, columns)).collect()
+        rows.iter().map(|row| decode_row(row, &columns)).collect()
     }
 }

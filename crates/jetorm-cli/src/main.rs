@@ -495,7 +495,7 @@ fn load_schema(path: &Path) -> Result<SchemaSet, String> {
 /// count — so deleted or squashed migrations leave gaps rather than
 /// causing a later generate to reuse (and mis-sort against) an applied
 /// version.
-fn next_version(migrations: &MigrationSet, name: &str) -> String {
+pub(crate) fn next_version(migrations: &MigrationSet, name: &str) -> String {
     let highest = migrations
         .migrations()
         .iter()

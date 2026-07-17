@@ -237,6 +237,7 @@ where
             &K::indexes(),
             &self.aggregates,
             self.order_by_keys,
+            self.having.as_deref(),
         )
     }
 }
@@ -542,11 +543,7 @@ where
                     &mut editor,
                     block,
                     predicate,
-                    &PredicateColumns {
-                        columns: R::Source::COLUMNS,
-                        offset: 0,
-                        widen_nullable: false,
-                    },
+                    &PredicateColumns::of_entity::<R::Source>(),
                 )?);
             }
             if let Some(predicate) = join.related_filter.as_deref() {
@@ -555,9 +552,12 @@ where
                     block,
                     predicate,
                     &PredicateColumns {
-                        columns: R::Target::COLUMNS,
+                        // The null-extended side widens every column.
+                        types: R::Target::COLUMNS
+                            .iter()
+                            .map(|column| column_scalar_type(column).with_nullability(true))
+                            .collect(),
                         offset: R::Source::COLUMNS.len(),
-                        widen_nullable: true,
                     },
                 )?;
                 condition = Some(match condition {
@@ -619,6 +619,7 @@ fn lower_grouped<E>(
     keys: &[usize],
     aggregates: &[AggregateSpec],
     order_by_keys: bool,
+    having: Option<&Predicate>,
 ) -> Result<Module, LoweringError>
 where
     E: Entity,
@@ -725,6 +726,39 @@ where
             OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
         )?;
         let mut relation = editor.result(aggregate, 0)?;
+
+        if let Some(predicate) = having {
+            // HAVING is a filter whose row is the grouped output: keys at
+            // their leading positions, aggregates after them, typed by the
+            // output schema rather than any entity's columns.
+            let mut output_scalars: Vec<ScalarType> = keys
+                .iter()
+                .map(|index| column_scalar_type(&E::COLUMNS[*index]))
+                .collect();
+            output_scalars.extend(aggregate_types.iter().cloned());
+            let filter = editor.append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Filter)
+                    .with_operands(vec![relation])
+                    .with_result(output_relation.clone()),
+            )?;
+            let region = editor.add_region(filter)?;
+            let block = editor.append_block(region, output_types.clone())?;
+            let (predicate_value, _) = lower_node(
+                &mut editor,
+                block,
+                predicate,
+                &PredicateColumns {
+                    types: output_scalars,
+                    offset: 0,
+                },
+            )?;
+            editor.append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
+            )?;
+            relation = editor.result(filter, 0)?;
+        }
 
         if order_by_keys {
             let sort_keys = vec![
@@ -838,11 +872,7 @@ where
             editor,
             block,
             predicate,
-            &PredicateColumns {
-                columns: E::COLUMNS,
-                offset: 0,
-                widen_nullable: false,
-            },
+            &PredicateColumns::of_entity::<E>(),
         )?;
         editor.append_operation(
             block,
@@ -928,17 +958,29 @@ where
     })
 }
 
-/// Lowers one predicate node inside a row-lambda block.
-///
 /// Where one predicate's columns live inside the block being lowered.
 ///
-/// A plain select's predicate addresses the row from position zero; a
-/// join's related predicate addresses the target entity's columns at an
-/// offset, widened to nullable because the left join null-extends them.
-struct PredicateColumns {
-    columns: &'static [ColumnMeta],
-    offset: usize,
-    widen_nullable: bool,
+/// A plain select's predicate addresses the entity row from position zero;
+/// a join's related predicate addresses the target's columns at an offset,
+/// widened to nullable because the left join null-extends them; a HAVING
+/// predicate addresses a grouped output row that is no entity's at all.
+/// Each caller therefore states the exact scalar type per position.
+pub(super) struct PredicateColumns {
+    pub(super) types: Vec<ScalarType>,
+    pub(super) offset: usize,
+}
+
+impl PredicateColumns {
+    /// The typing of one entity's own row, from position zero.
+    pub(super) fn of_entity<E>() -> Self
+    where
+        E: Entity,
+    {
+        Self {
+            types: E::COLUMNS.iter().map(column_scalar_type).collect(),
+            offset: 0,
+        }
+    }
 }
 
 /// The predicate carries the static typing of every operand, so lowering
@@ -952,11 +994,7 @@ fn lower_node(
     match node {
         Predicate::Column(index) => {
             let value = editor.block_argument(block, columns.offset + *index)?;
-            let mut ty = column_scalar_type(&columns.columns[*index]);
-            if columns.widen_nullable {
-                ty = ty.with_nullability(true);
-            }
-            Ok((value, ty))
+            Ok((value, columns.types[*index].clone()))
         }
         Predicate::Bind { position, ty } => {
             let kind = if ty.list {
@@ -1034,9 +1072,8 @@ pub(super) fn lower_entity_node(
         block,
         node,
         &PredicateColumns {
-            columns,
+            types: columns.iter().map(column_scalar_type).collect(),
             offset: 0,
-            widen_nullable: false,
         },
     )
 }

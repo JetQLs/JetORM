@@ -32,6 +32,36 @@ fn grouped_queries_render_where_before_group_by() {
 }
 
 #[test]
+fn having_filters_groups_by_their_aggregates() {
+    let query = OrderEntity::find()
+        .group_by((order::Customer,))
+        .select_agg((count_rows(), sum(order::Quantity)))
+        .having(|(rows, total)| rows.ge(2).and(total.gt(5)));
+    assert_eq!(
+        query.binds(),
+        [Value::Int64(2), Value::Int64(5)],
+        "having values bind like every other value"
+    );
+    let module = query.clone().into_afterburner_ir().expect("having lowers");
+    let statement = Postgres.render_query(&module).expect("having renders");
+    let sql = statement.sql();
+    assert!(
+        sql.contains("\"__agg_0_count\" >= $1::bigint"),
+        "the first aggregate is addressed by output position: {sql}"
+    );
+    assert!(
+        sql.contains("\"__agg_1_sum\" > $2::bigint"),
+        "the second aggregate compares at its promoted width: {sql}"
+    );
+
+    // The having predicate is part of the statement's identity.
+    let without = OrderEntity::find()
+        .group_by((order::Customer,))
+        .select_agg((count_rows(), sum(order::Quantity)));
+    assert_ne!(query.shape(), without.shape());
+}
+
+#[test]
 fn limits_and_duplicate_keys_are_rejected_at_lowering() {
     // A limit's meaning under grouping is ambiguous — source rows or
     // groups — so it must not guess.

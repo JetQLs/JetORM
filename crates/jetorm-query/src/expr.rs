@@ -18,6 +18,18 @@ pub(crate) struct OperandType {
 }
 
 impl OperandType {
+    /// Reads the typing of one value type directly.
+    pub(crate) fn of_value<T>() -> Self
+    where
+        T: crate::SqlValueTyping,
+    {
+        Self {
+            column_type: T::COLUMN_TYPE_OF,
+            nullable: T::NULLABLE_OF,
+            list: false,
+        }
+    }
+
     /// Reads the typing of one column from its entity metadata.
     fn of_column<C>() -> Self
     where

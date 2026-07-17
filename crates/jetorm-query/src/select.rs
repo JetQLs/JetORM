@@ -53,6 +53,8 @@ pub struct QueryShape {
     group: Option<(Vec<usize>, Vec<crate::aggregate::AggregateSpec>, bool)>,
     /// Predicate over a join's related entity, part of a join's identity.
     related_filter: Option<Arc<Predicate>>,
+    /// Predicate over a grouping's output row, part of its identity.
+    having: Option<Arc<Predicate>>,
 }
 
 impl PartialEq for QueryShape {
@@ -71,6 +73,11 @@ impl PartialEq for QueryShape {
             && self.kind == other.kind
             && self.join == other.join
             && self.group == other.group
+            && match (&self.having, &other.having) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
+                _ => false,
+            }
             && match (&self.related_filter, &other.related_filter) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
@@ -298,6 +305,7 @@ where
             join: None,
             group: None,
             related_filter: None,
+            having: None,
         }
     }
 
@@ -407,6 +415,7 @@ where
             join: None,
             group: None,
             related_filter: None,
+            having: None,
         }
     }
 }
@@ -470,6 +479,7 @@ impl QueryShape {
             join: Some(join),
             group: None,
             related_filter,
+            having: None,
         }
     }
 
@@ -479,6 +489,7 @@ impl QueryShape {
         keys: Vec<usize>,
         aggregates: Vec<crate::aggregate::AggregateSpec>,
         order_by_keys: bool,
+        having: Option<Arc<Predicate>>,
     ) -> Self
     where
         E: Entity,
@@ -497,6 +508,7 @@ impl QueryShape {
         None::<TypeId>.hash(&mut hasher);
         (&keys, &aggregates, order_by_keys).hash(&mut hasher);
         None::<Arc<Predicate>>.hash(&mut hasher);
+        having.hash(&mut hasher);
 
         Self {
             hash: hasher.finish(),
@@ -511,6 +523,7 @@ impl QueryShape {
             join: None,
             group: Some((keys, aggregates, order_by_keys)),
             related_filter: None,
+            having,
         }
     }
 
@@ -546,6 +559,7 @@ impl QueryShape {
             join: None,
             group: None,
             related_filter: None,
+            having: None,
         }
     }
 
@@ -578,6 +592,7 @@ impl QueryShape {
             join: None,
             group: None,
             related_filter: None,
+            having: None,
         }
     }
 }

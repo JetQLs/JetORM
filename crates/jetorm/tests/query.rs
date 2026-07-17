@@ -1,5 +1,5 @@
 use jetorm::afterburner;
-use jetorm::ir::{LogicalOp, OperationKind, TerminatorOp, verify_module};
+use jetorm::ir::{LogicalOp, OperationKind, ScalarOp, TerminatorOp, verify_module};
 use jetorm::prelude::*;
 use jetorm::{Dialect, Postgres};
 
@@ -20,7 +20,11 @@ fn derived_entity_query_lowers_to_verified_ir() {
         .limit(20);
     assert_eq!(
         query.binds(),
-        [Value::Text("%@example.com".to_owned()), Value::Int64(100),]
+        [
+            Value::Text("%@example.com".to_owned()),
+            Value::Int64(100),
+            Value::Int64(20),
+        ]
     );
 
     let module = afterburner!(query).expect("derived query lowers to verified IR");
@@ -42,11 +46,14 @@ fn derived_entity_query_lowers_to_verified_ir() {
                     | OperationKind::Logical(LogicalOp::Filter)
                     | OperationKind::Logical(LogicalOp::Sort { .. })
                     | OperationKind::Logical(LogicalOp::Limit { .. })
+                    // The row limit lowers as a parameter operand, which
+                    // lives beside its consumer in the root block.
+                    | OperationKind::Scalar(ScalarOp::Parameter { .. })
                     | OperationKind::Terminator(TerminatorOp::QueryReturn)
             )
         })
         .collect();
-    assert_eq!(root.operations().len(), 5);
+    assert_eq!(root.operations().len(), 6);
     assert!(kinds.iter().all(|expected| *expected));
 }
 
@@ -67,13 +74,17 @@ fn derived_entity_query_renders_to_postgres_sql() {
          FROM \"users\" AS \"t0\" \
          WHERE ((\"t0\".\"email\" LIKE $1::text) AND (\"t0\".\"id\" > $2::bigint)) \
          ORDER BY \"t0\".\"id\" DESC \
-         LIMIT 20"
+         LIMIT $3::bigint"
     );
     // The executor binds `binds[bind_order[n]]` to placeholder `$n+1`.
-    assert_eq!(statement.bind_order(), [0, 1]);
+    assert_eq!(statement.bind_order(), [0, 1, 2]);
     assert_eq!(
         binds,
-        [Value::Text("%@example.com".to_owned()), Value::Int64(100),]
+        [
+            Value::Text("%@example.com".to_owned()),
+            Value::Int64(100),
+            Value::Int64(20),
+        ]
     );
 }
 

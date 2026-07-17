@@ -55,7 +55,8 @@
 //! }
 //!
 //! let query = UserEntity::find().filter(Id.gt(100)).limit(10);
-//! assert_eq!(query.binds().len(), 1);
+//! // The predicate value plus the row limit both ride in the bind table.
+//! assert_eq!(query.binds().len(), 2);
 //! let module = afterburner!(query).expect("query lowers to verified IR");
 //! ```
 
@@ -68,4 +69,4 @@ mod select;
 
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use lowering::LoweringError;
-pub use select::{EntityQuery, Select};
+pub use select::{EntityQuery, QueryShape, Select};

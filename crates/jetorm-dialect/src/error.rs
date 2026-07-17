@@ -3,7 +3,11 @@ use std::{error::Error, fmt};
 use afterburner::ir::VerificationError;
 
 /// Failure produced while rendering IR into dialect SQL.
+///
+/// The set of failure modes grows as dialects gain coverage, so callers must
+/// handle unknown variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RenderError {
     /// The module failed AfterBurner IR verification.
     InvalidModule(Vec<VerificationError>),

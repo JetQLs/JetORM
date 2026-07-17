@@ -3,13 +3,29 @@ use afterburner::ir::Module;
 use crate::error::RenderError;
 use crate::statement::Statement;
 
+mod sealed {
+    /// Restricts `Dialect` implementations to this crate.
+    ///
+    /// [`crate::Statement`]'s representation — SQL text plus a bind-position
+    /// layout — is an internal contract between the renderer and the
+    /// executor, and it will change as dialects gain features. Sealing keeps
+    /// that freedom; unsealing later is not a breaking change, so this is the
+    /// reversible choice.
+    pub trait Sealed {}
+
+    impl Sealed for crate::postgres::Postgres {}
+}
+
 /// Renders verified AfterBurner IR into one SQL dialect.
 ///
 /// Implementations own every dialect-specific spelling decision: identifier
 /// quoting, placeholder syntax, type names, and literal formats. They accept
 /// only whole verified modules, so a rendered [`Statement`] is always
 /// consistent with the IR the optimizer saw.
-pub trait Dialect {
+///
+/// The trait is sealed: dialects live in this crate, alongside the
+/// [`Statement`] representation they must produce.
+pub trait Dialect: sealed::Sealed {
     /// Returns the stable dialect name used in diagnostics and cache keys.
     fn name(&self) -> &'static str;
 

@@ -12,6 +12,7 @@ pub struct ContainerAttrs {
 #[derive(Default)]
 pub struct FieldAttrs {
     pub column: Option<String>,
+    pub column_type: Option<syn::Ident>,
     pub primary_key: bool,
     pub auto_increment: bool,
     pub unique: bool,
@@ -71,6 +72,10 @@ pub fn parse_field(field: &Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("column") {
                 attrs.column = Some(meta.value()?.parse::<LitStr>()?.value());
                 Ok(())
+            } else if meta.path.is_ident("column_type") {
+                let literal = meta.value()?.parse::<LitStr>()?;
+                attrs.column_type = Some(literal.parse::<syn::Ident>()?);
+                Ok(())
             } else if meta.path.is_ident("primary_key") {
                 attrs.primary_key = true;
                 Ok(())
@@ -81,7 +86,7 @@ pub fn parse_field(field: &Field) -> syn::Result<FieldAttrs> {
                 attrs.unique = true;
                 Ok(())
             } else {
-                Err(meta.error("unknown field attribute; expected `column`, `primary_key`, `auto_increment`, or `unique`"))
+                Err(meta.error("unknown field attribute; expected `column`, `column_type`, `primary_key`, `auto_increment`, or `unique`"))
             }
         })?;
     }

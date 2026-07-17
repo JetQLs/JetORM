@@ -17,3 +17,4 @@ workspace = true
 
 [dependencies]
 jetorm-entity.workspace = true
+serde.workspace = true

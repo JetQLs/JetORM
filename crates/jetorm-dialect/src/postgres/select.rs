@@ -34,8 +34,8 @@ struct SelectBuilder {
     group_sql: Option<Vec<String>>,
     distinct: bool,
     order_sql: Vec<String>,
-    offset: Option<u64>,
-    fetch: Option<u64>,
+    offset_sql: Option<String>,
+    fetch_sql: Option<String>,
     stage: Stage,
 }
 
@@ -50,8 +50,8 @@ impl SelectBuilder {
             group_sql: None,
             distinct: false,
             order_sql: Vec::new(),
-            offset: None,
-            fetch: None,
+            offset_sql: None,
+            fetch_sql: None,
             stage: Stage::From,
         }
     }
@@ -97,11 +97,13 @@ impl SelectBuilder {
             sql.push_str(" ORDER BY ");
             sql.push_str(&self.order_sql.join(", "));
         }
-        if let Some(fetch) = self.fetch {
-            sql.push_str(&format!(" LIMIT {fetch}"));
+        if let Some(fetch) = &self.fetch_sql {
+            sql.push_str(" LIMIT ");
+            sql.push_str(fetch);
         }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!(" OFFSET {offset}"));
+        if let Some(offset) = &self.offset_sql {
+            sql.push_str(" OFFSET ");
+            sql.push_str(offset);
         }
         Ok(sql)
     }
@@ -248,14 +250,55 @@ impl<'module> Renderer<'module> {
                 builder.stage = Stage::OrderBy;
                 Ok(builder)
             }
-            OperationKind::Logical(LogicalOp::Limit { offset, fetch }) => {
+            OperationKind::Logical(LogicalOp::Limit {
+                has_offset,
+                has_fetch,
+            }) => {
                 let input = self.input_relation(operation_id)?;
                 let mut builder = self.build_relation(input)?;
                 if builder.stage >= Stage::Limit {
                     builder = self.wrap(builder)?;
                 }
-                builder.offset = offset;
-                builder.fetch = fetch;
+                // Row counts are scalar operands following the relation, so
+                // parameterized counts render as placeholders and every page
+                // of a paginated query shares one statement.
+                let operation = self
+                    .module
+                    .operation(operation_id)
+                    .ok_or_else(|| RenderError::inconsistent("stale limit operation"))?;
+                let parent = operation.parent();
+                let mut counts = operation.operands()[1..].iter().copied();
+
+                let scope = RowScope::new(parent, &builder.alias, &builder.columns);
+                let offset_sql = if has_offset {
+                    let operand = counts.next().ok_or_else(|| {
+                        RenderError::inconsistent("limit is missing its offset operand")
+                    })?;
+                    Some(render_value(
+                        self.module,
+                        &mut self.params,
+                        &scope,
+                        operand,
+                    )?)
+                } else {
+                    None
+                };
+                let fetch_sql = if has_fetch {
+                    let operand = counts.next().ok_or_else(|| {
+                        RenderError::inconsistent("limit is missing its fetch operand")
+                    })?;
+                    Some(render_value(
+                        self.module,
+                        &mut self.params,
+                        &scope,
+                        operand,
+                    )?)
+                } else {
+                    None
+                };
+
+                builder.offset_sql = offset_sql;
+                builder.fetch_sql = fetch_sql;
                 builder.stage = Stage::Limit;
                 Ok(builder)
             }
@@ -289,7 +332,10 @@ impl<'module> Renderer<'module> {
     /// guarantee that a derived table's ordering survives the enclosing
     /// query, so rendering it would silently drop the sort.
     fn wrap(&mut self, builder: SelectBuilder) -> Result<SelectBuilder, RenderError> {
-        if !builder.order_sql.is_empty() && builder.fetch.is_none() && builder.offset.is_none() {
+        if !builder.order_sql.is_empty()
+            && builder.fetch_sql.is_none()
+            && builder.offset_sql.is_none()
+        {
             return Err(RenderError::unsupported(
                 "an interior ORDER BY without a row limit cannot be preserved through a \
                  derived table",

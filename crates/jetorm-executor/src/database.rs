@@ -114,7 +114,10 @@ impl Executor for &Database {
 ///
 /// Dropping the value without calling [`Transaction::commit`] rolls the
 /// transaction back, so an early `?` return can never leave changes applied.
+/// That also makes an ignored transaction silently discard its work, which is
+/// why the type is `#[must_use]`.
 #[derive(Debug)]
+#[must_use = "a dropped transaction rolls back; call commit() to keep its changes"]
 pub struct Transaction<'database> {
     inner: sqlx::Transaction<'database, sqlx::Postgres>,
     plans: &'database PlanCache,

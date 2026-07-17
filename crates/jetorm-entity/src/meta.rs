@@ -43,7 +43,11 @@ impl TableMeta {
 /// `Copy` and constructible in `const` context so derive macros can emit
 /// whole-table metadata as constants. Temporal types use microsecond
 /// precision, matching both `chrono`'s lossless range and PostgreSQL storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// The type is deliberately exhaustive: downstream code matching on it should
+/// stop compiling when JetORM learns a new type, rather than silently taking
+/// a fallback branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ColumnType {
     /// SQL boolean.
     Boolean,

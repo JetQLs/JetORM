@@ -24,6 +24,7 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("test") => cargo(&["test", "--workspace"], &[]),
         Some("lint") => lint(),
+        Some("bench") => cargo(&["bench", "-p", "jetorm-benchmarks"], &[]),
         Some("db-up") => compose(&["up", "-d", "--wait"]),
         Some("db-down") => compose(&["down", "-v"]),
         Some("test-live") => test_live(),
@@ -49,6 +50,7 @@ Usage: cargo xtask <task>
 Tasks:
   test        Run unit and integration tests (no database required)
   lint        rustfmt check + clippy with warnings denied
+  bench       Query-build benchmarks: JetORM vs SeaORM vs Diesel
   test-live   Run live `--ignored` tests; each starts its own disposable
               database container through testcontainers (needs Docker)
   db-up       Start the manual development database (docker compose)

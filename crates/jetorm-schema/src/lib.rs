@@ -1,22 +1,34 @@
 //! Abstract schema model and diff engine for JetORM.
 //!
 //! This crate defines the database-independent description of a schema —
-//! tables, columns, keys, and indexes — and computes the change set between
-//! two schema states. It is shared by migration generation (`jet migrate
-//! generate`), drift checking (`jet check`), and database introspection
-//! (`jet db pull`), so it lives outside the CLI.
+//! tables, columns, and keys — and computes the change set between two
+//! schema states. It is pure logic with no IO: migration generation
+//! (`jet migrate generate`), drift checking (`jet check`), and database
+//! introspection (`jet db pull`) all build on it.
 //!
-//! # Planned design
+//! # Code-first flow
 //!
-//! - JetORM is code-first: entity metadata from `jetorm-entity` is the source
-//!   of truth, and the expected database state is reconstructed by replaying
-//!   migration history.
-//! - The differ emits typed change operations (`AddColumn`, `DropTable`,
-//!   `AlterColumnType`, ...) with destructive changes flagged for explicit
-//!   confirmation and rename detection surfaced as questions, not guesses.
+//! JetORM treats entity definitions as the source of truth:
 //!
-//! The implementation lands with the migration milestone; this crate
-//! currently pins the workspace layout and dependency direction.
+//! 1. The **target** schema comes from entity metadata
+//!    ([`TableDef::from_entity`]).
+//! 2. The **current** schema is reconstructed by replaying applied
+//!    migrations ([`SchemaSet::apply`]).
+//! 3. [`diff`] computes the ordered change set turning current into target.
+//!    Destructive changes are flagged, and drop/add pairs that look like
+//!    renames surface as [`RenameCandidate`]s for explicit confirmation —
+//!    the differ never guesses a rename on its own.
+//!
+//! The core invariant, exercised heavily by tests: applying `diff(a, b)` to
+//! `a` always reproduces `b` exactly.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+mod apply;
+mod diff;
+mod model;
+
+pub use apply::ApplyError;
+pub use diff::{RenameCandidate, SchemaChange, SchemaDiff, diff};
+pub use model::{ColumnDef, SchemaSet, TableDef, TableName};

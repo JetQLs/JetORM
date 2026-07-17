@@ -106,7 +106,7 @@ async fn cursor_pages_resume_from_keys_in_both_directions() {
 
     // Walk forward: each page resumes after the previous page's last key.
     let first = ItemEntity::find()
-        .cursor_by(item::Id)
+        .cursor_by((item::Id,))
         .first(3)
         .all(&db)
         .await
@@ -114,7 +114,7 @@ async fn cursor_pages_resume_from_keys_in_both_directions() {
     assert_eq!(ids(&first), [1, 2, 3]);
 
     let second = ItemEntity::find()
-        .cursor_by(item::Id)
+        .cursor_by((item::Id,))
         .after(first.last().expect("page has rows").id)
         .first(3)
         .all(&db)
@@ -124,7 +124,7 @@ async fn cursor_pages_resume_from_keys_in_both_directions() {
 
     // The tail, in ascending order despite fetching descending.
     let tail = ItemEntity::find()
-        .cursor_by(item::Id)
+        .cursor_by((item::Id,))
         .last(2)
         .all(&db)
         .await
@@ -133,7 +133,7 @@ async fn cursor_pages_resume_from_keys_in_both_directions() {
 
     // Bounded window: between two keys, from the back.
     let window = ItemEntity::find()
-        .cursor_by(item::Id)
+        .cursor_by((item::Id,))
         .after(1)
         .before(6)
         .last(2)

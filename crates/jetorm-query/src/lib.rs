@@ -82,7 +82,7 @@ pub use aggregate::{
     Comparable, GroupBy, GroupedSelect, HavingExpr, Summable, avg, count_rows, max, min, sum,
 };
 pub use behavior::Exists;
-pub use cursor::{Cursor, CursorPage};
+pub use cursor::{Cursor, CursorKey, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use join::JoinSelect;
 pub use lowering::LoweringError;

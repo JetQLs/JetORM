@@ -30,7 +30,7 @@ mod meta;
 mod relation;
 mod value;
 
-pub use entity::{Column, Entity, Model, SingleKeyEntity};
+pub use entity::{Column, Entity, KeyedEntity, Model, SingleKeyEntity};
 pub use error::{DecodeError, ValueTypeMismatch};
 pub use json::Json;
 pub use meta::{ColumnMeta, ColumnType, TableMeta};

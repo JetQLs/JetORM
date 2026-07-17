@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock};
 use std::{fmt, marker::PhantomData};
 
 use afterburner::ir::BinaryOperator;
-use jetorm_entity::{Column, Entity, SingleKeyEntity, Value};
+use jetorm_entity::{Column, Entity, KeyedEntity, SingleKeyEntity, Value};
 
 use crate::behavior::Exists;
 use crate::expr::{Expr, OrderKey, Predicate, SortKeySpec, normalize};
@@ -684,6 +684,20 @@ pub trait EntityQuery: Entity {
     {
         use crate::expr::ColumnExt;
         Self::find().filter(Self::PrimaryKeyColumn::default().eq(value))
+    }
+
+    /// Starts a select for the row identified by the full primary key.
+    ///
+    /// Works at any key width: a single-column key is its bare value, a
+    /// composite key the tuple of its columns' values in declaration
+    /// order. Every value binds as a parameter, and the equality chain is
+    /// typed by the entity's own column metadata.
+    #[must_use]
+    fn find_by_key(key: Self::Key) -> Select<Self>
+    where
+        Self: KeyedEntity,
+    {
+        Self::find().filter(crate::expr::key_equalities::<Self>(key))
     }
 }
 

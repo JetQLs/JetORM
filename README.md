@@ -128,7 +128,7 @@ let pager = ItemEntity::find().order_by(item::Id.asc()).paginate(&db, 50);
 let (items, pages) = (pager.fetch_page(0).await?, pager.num_pages().await?);
 
 // Page 1000 costs what page 1 costs:
-let page = ItemEntity::find().cursor_by(item::Id).after(last_seen).first(50)
+let page = ItemEntity::find().cursor_by((item::Id,)).after(last_seen).first(50)
     .all(&db).await?;
 ```
 

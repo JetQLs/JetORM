@@ -54,13 +54,15 @@ pub use jetorm_entity::{
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
-    CursorExecute, Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, JetRow,
-    JoinExecute, PaginateExecute, Paginator, PlanCache, ProjectedExecute, SelectExecute,
+    CursorExecute, Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, GroupedExecute,
+    JetRow, JoinExecute, PaginateExecute, Paginator, PlanCache, ProjectedExecute, SelectExecute,
     Transaction, load_many, load_one,
 };
 pub use jetorm_query::{
-    CacheableQuery, ColumnExt, ColumnList, CountQuery, Cursor, CursorPage, EntityQuery, Expr,
-    JoinSelect, LoweringError, OrderKey, Projected, Select, TextColumnExt,
+    Aggregate, AggregateFunction, AggregateList, AggregateSpec, Averageable, CacheableQuery,
+    ColumnExt, ColumnList, Comparable, CountQuery, Cursor, CursorPage, EntityQuery, Expr, GroupBy,
+    GroupedSelect, JoinSelect, LoweringError, OrderKey, Projected, Select, Summable, TextColumnExt,
+    avg, count_rows, max, min, sum,
 };
 
 /// Single-import surface for application code.
@@ -72,7 +74,7 @@ pub mod prelude {
     };
     #[cfg(feature = "executor")]
     pub use crate::{
-        CursorExecute, Database, JoinExecute, PaginateExecute, ProjectedExecute, SelectExecute,
-        Transaction, load_many, load_one,
+        CursorExecute, Database, GroupedExecute, JoinExecute, PaginateExecute, ProjectedExecute,
+        SelectExecute, Transaction, load_many, load_one,
     };
 }

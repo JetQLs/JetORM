@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use jetorm_entity::{ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue};
-use jetorm_query::{ColumnList, Projected, Select};
+use jetorm_query::{AggregateList, ColumnList, GroupedSelect, Projected, Select};
 
 use crate::database::Executor;
 use crate::error::ExecuteError;
@@ -187,5 +187,57 @@ where
     {
         let mut rows = self.limit(1).all(executor).await?;
         Ok(rows.pop())
+    }
+}
+
+/// Execution entry points for grouped aggregate queries.
+///
+/// Each fetched row pairs one group's key values with its aggregate
+/// values, decoded at the types the database really returns.
+pub trait GroupedExecute<E, K, A>: Sized
+where
+    E: Entity,
+    K: ColumnList<E>,
+    A: AggregateList<E>,
+{
+    /// Fetches every group.
+    #[allow(clippy::type_complexity)]
+    fn all<X>(
+        self,
+        executor: X,
+    ) -> impl Future<Output = Result<Vec<(K::Row, A::Row)>, ExecuteError>> + Send
+    where
+        X: Executor;
+}
+
+impl<E, K, A> GroupedExecute<E, K, A> for GroupedSelect<E, K, A>
+where
+    E: Entity,
+    K: ColumnList<E> + Send,
+    A: AggregateList<E> + Send,
+{
+    async fn all<X>(self, executor: X) -> Result<Vec<(K::Row, A::Row)>, ExecuteError>
+    where
+        X: Executor,
+    {
+        let statement = executor.plan_cache().statement(&self)?;
+        let mut column_types: Vec<ColumnType> = self
+            .key_indexes()
+            .iter()
+            .map(|index| E::COLUMNS[*index].column_type())
+            .collect();
+        column_types.extend(self.aggregate_specs().iter().map(|spec| spec.column_type));
+        let rows = executor
+            .fetch_rows(statement, self.into_binds(), column_types)
+            .await?;
+
+        let mut groups = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
+            groups.push(
+                GroupedSelect::<E, K, A>::decode_row(row.into_values())
+                    .map_err(|source| ExecuteError::Decode { row: index, source })?,
+            );
+        }
+        Ok(groups)
     }
 }

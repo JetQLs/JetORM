@@ -199,3 +199,26 @@ fn malformed_manual_models_fail_lowering_without_panicking() {
         })
     ));
 }
+
+#[test]
+fn exists_preserves_distinct_because_offsets_make_it_semantic() {
+    use jetorm::{Dialect, IntoAfterBurnerIr, Postgres};
+    // With rows [x, x], distinct().offset(1) leaves zero rows — one
+    // distinct row, skipped — so EXISTS must see the deduplication.
+    let query = UserEntity::find().distinct().offset(1).exists();
+    let module = query.clone().into_afterburner_ir().expect("exists lowers");
+    let statement = Postgres.render_query(&module).expect("exists renders");
+    assert!(
+        statement.sql().contains("DISTINCT"),
+        "distinct survives into the existence subquery: {}",
+        statement.sql()
+    );
+
+    use jetorm::CacheableQuery;
+    let plain = UserEntity::find().offset(1).exists();
+    assert_ne!(
+        CacheableQuery::shape(&query),
+        CacheableQuery::shape(&plain),
+        "the distinct and non-distinct existence tests are different statements"
+    );
+}

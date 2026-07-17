@@ -34,6 +34,10 @@ pub struct Introspection {
     pub schema: SchemaSet,
     /// Columns skipped for lack of a type mapping, in catalog order.
     pub skipped: Vec<SkippedColumn>,
+    /// Facts that were captured but changed shape on the way — normalized
+    /// constraint names, serial columns pulled as identity, length
+    /// modifiers mapped away. Present so nothing is lost silently.
+    pub notes: Vec<String>,
 }
 
 /// Maps a PostgreSQL type name onto JetORM's column type.
@@ -85,6 +89,7 @@ pub async fn introspect(
 ) -> Result<Introspection, MigrationError> {
     let mut schema = SchemaSet::new();
     let mut skipped = Vec::new();
+    let mut notes = Vec::new();
 
     let tables = sqlx::query(
         "SELECT table_name FROM information_schema.tables
@@ -103,7 +108,8 @@ pub async fn introspect(
         let mut table = TableDef::new(qualified(schema_name, &table_name));
 
         let columns = sqlx::query(
-            "SELECT column_name, udt_name, is_nullable, identity_generation
+            "SELECT column_name, udt_name, is_nullable, identity_generation,
+                    column_default, character_maximum_length
              FROM information_schema.columns
              WHERE table_schema = $1 AND table_name = $2
              ORDER BY ordinal_position",
@@ -129,8 +135,34 @@ pub async fn introspect(
                 definition = definition.nullable();
             }
             let identity: Option<String> = column_row.get(3);
+            let default: Option<String> = column_row.get(4);
             if identity.is_some() {
                 definition = definition.auto_increment();
+            } else if let Some(default) = &default {
+                // A serial column is a nextval() default in the catalog;
+                // it is database-generated all the same. Any other default
+                // has no model representation and must be said out loud.
+                if default.starts_with("nextval(") {
+                    definition = definition.auto_increment();
+                    notes.push(format!(
+                        "{table_name}.{column_name}: serial pulled as an \
+                         identity column"
+                    ));
+                } else {
+                    notes.push(format!(
+                        "{table_name}.{column_name}: column default \
+                         {default:?} is not representable and was dropped"
+                    ));
+                }
+            }
+            let length: Option<i32> = column_row.get(5);
+            if let Some(length) = length
+                && matches!(udt_name.as_str(), "varchar" | "bpchar")
+            {
+                notes.push(format!(
+                    "{table_name}.{column_name}: {udt_name}({length}) mapped \
+                     to text; the length limit is not represented"
+                ));
             }
             table = table.with_column(definition);
         }
@@ -159,12 +191,28 @@ pub async fn introspect(
                 .or_default()
                 .push(row.get(1));
         }
-        for columns in unique_columns.values() {
-            if let [column] = columns.as_slice()
-                && let Some(definition) = table.column(column)
-            {
-                let definition = definition.clone().unique();
-                table = table.with_column(definition);
+        for (constraint, columns) in &unique_columns {
+            if let [column] = columns.as_slice() {
+                if let Some(definition) = table.column(column) {
+                    let definition = definition.clone().unique();
+                    table = table.with_column(definition);
+                    let default_name = format!("{table_name}_{column}_key");
+                    if *constraint != default_name {
+                        notes.push(format!(
+                            "{table_name}: unique constraint {constraint:?} \
+                             recorded under the default name {default_name:?}; \
+                             later drops will use the default name"
+                        ));
+                    }
+                }
+            } else {
+                // Multi-column uniqueness has no model representation yet;
+                // absence must be reported, never silent.
+                skipped.push(SkippedColumn {
+                    table: table_name.clone(),
+                    column: columns.join(", "),
+                    data_type: format!("composite unique constraint {constraint}"),
+                });
             }
         }
 
@@ -192,11 +240,13 @@ pub async fn introspect(
     // column lists come from the same constraint, aligned by position.
     let foreign_keys = sqlx::query(
         "SELECT c.conname, t.relname, a.attname, ft.relname, fa.attname,
-                c.confdeltype::text, c.confupdtype::text, cardinality(c.conkey)
+                c.confdeltype::text, c.confupdtype::text, cardinality(c.conkey),
+                fn.nspname
          FROM pg_constraint c
          JOIN pg_class t ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
          JOIN pg_class ft ON ft.oid = c.confrelid
+         JOIN pg_namespace fn ON fn.oid = ft.relnamespace
          JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, position) ON true
          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
          JOIN unnest(c.confkey) WITH ORDINALITY AS fk(attnum, position)
@@ -222,12 +272,28 @@ pub async fn introspect(
         let Some(table) = schema.table(&qualified(schema_name, &owner)).cloned() else {
             continue;
         };
+        let live_name: String = row.get(0);
+        let column: String = row.get(2);
+        // Entity metadata always regenerates the default constraint name,
+        // and the differ matches constraints by name, so a live name kept
+        // verbatim would show as perpetual churn on every generate. The
+        // pull normalizes the name and says so; the live database keeps
+        // its own name until the operator renames it.
+        let default_name = format!("{owner}_{column}_fkey");
+        if live_name != default_name {
+            notes.push(format!(
+                "{owner}: foreign key {live_name:?} recorded under the \
+                 default name {default_name:?}; rename the live constraint \
+                 to match, or later drops will miss it"
+            ));
+        }
+        let target_schema: String = row.get(8);
         let delete_code: String = row.get(5);
         let update_code: String = row.get(6);
         let foreign_key = ForeignKeyDef::new(
-            row.get::<String, _>(0),
-            row.get::<String, _>(2),
-            qualified(schema_name, &row.get::<String, _>(3)),
+            default_name,
+            column,
+            qualified(&target_schema, &row.get::<String, _>(3)),
             row.get::<String, _>(4),
         )
         .on_delete(action_code(&delete_code))
@@ -235,7 +301,11 @@ pub async fn introspect(
         schema.insert(table.with_foreign_key(foreign_key));
     }
 
-    Ok(Introspection { schema, skipped })
+    Ok(Introspection {
+        schema,
+        skipped,
+        notes,
+    })
 }
 
 /// Maps `pg_constraint`'s single-letter action codes.

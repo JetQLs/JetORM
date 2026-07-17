@@ -416,7 +416,10 @@ where
             root,
             &RowPipeline {
                 filter: exists.select.filter.as_deref(),
-                distinct: false,
+                // DISTINCT must survive: with an offset, deduplication
+                // changes how many rows the offset can skip past, and
+                // therefore whether anything remains to exist.
+                distinct: exists.select.distinct,
                 order: &[],
                 has_offset: exists.select.offset.is_some(),
                 has_fetch: exists.select.fetch.is_some(),

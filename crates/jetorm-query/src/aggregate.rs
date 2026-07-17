@@ -249,51 +249,116 @@ pub struct AggregateRef<T> {
     output: PhantomData<fn() -> T>,
 }
 
+/// Comparison operands of one aggregate result type.
+///
+/// The operand is always the non-null type: comparing a nullable aggregate
+/// against SQL `NULL` with `=` would silently match nothing under
+/// three-valued logic, so `eq(None)` must not compile —
+/// [`AggregateRef::is_null`] is that question's correct spelling.
+pub trait AggregateComparand: SqlValue {
+    /// The value type comparisons accept.
+    type Operand: SqlValue + Into<Self>;
+}
+
+macro_rules! impl_aggregate_comparand {
+    ($($ty:ty),+ $(,)?) => {
+        $(impl AggregateComparand for $ty {
+            type Operand = $ty;
+        })+
+    };
+}
+
+impl_aggregate_comparand!(
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+    rust_decimal::Decimal,
+    String,
+    chrono::NaiveDate,
+    chrono::NaiveTime,
+    chrono::NaiveDateTime,
+    chrono::DateTime<chrono::Utc>,
+);
+
+impl<U> AggregateComparand for Option<U>
+where
+    U: AggregateComparand<Operand = U>,
+    Option<U>: SqlValue,
+{
+    type Operand = U;
+}
+
 impl<T> AggregateRef<T>
 where
-    T: SqlValue,
+    T: AggregateComparand,
 {
-    fn compare(self, op: BinaryOperator, value: impl Into<T>) -> HavingExpr {
+    fn compare(self, op: BinaryOperator, value: impl Into<T::Operand>) -> HavingExpr {
         HavingExpr {
             node: Node::Binary {
                 op,
                 left: Box::new(Node::Column(self.position)),
                 right: Box::new(Node::Value {
                     value: value.into().into_value(),
-                    ty: OperandType::of_value::<T>(),
+                    ty: OperandType::of_value::<T::Operand>(),
                 }),
             },
         }
     }
 
     /// Requires the aggregate to equal the value.
-    pub fn eq(self, value: impl Into<T>) -> HavingExpr {
+    pub fn eq(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::Equal, value)
     }
 
     /// Requires the aggregate to differ from the value.
-    pub fn ne(self, value: impl Into<T>) -> HavingExpr {
+    pub fn ne(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::NotEqual, value)
     }
 
     /// Requires the aggregate to be below the value.
-    pub fn lt(self, value: impl Into<T>) -> HavingExpr {
+    pub fn lt(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::LessThan, value)
     }
 
     /// Requires the aggregate to be at most the value.
-    pub fn le(self, value: impl Into<T>) -> HavingExpr {
+    pub fn le(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::LessThanOrEqual, value)
     }
 
     /// Requires the aggregate to exceed the value.
-    pub fn gt(self, value: impl Into<T>) -> HavingExpr {
+    pub fn gt(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::GreaterThan, value)
     }
 
     /// Requires the aggregate to be at least the value.
-    pub fn ge(self, value: impl Into<T>) -> HavingExpr {
+    pub fn ge(self, value: impl Into<T::Operand>) -> HavingExpr {
         self.compare(BinaryOperator::GreaterThanOrEqual, value)
+    }
+}
+
+impl<U> AggregateRef<Option<U>>
+where
+    Option<U>: SqlValue,
+{
+    fn null_test(self, op: afterburner::ir::UnaryOperator) -> HavingExpr {
+        HavingExpr {
+            node: Node::Unary {
+                op,
+                operand: Box::new(Node::Column(self.position)),
+            },
+        }
+    }
+
+    /// Requires the aggregate to be SQL `NULL` — an all-`NULL` group.
+    pub fn is_null(self) -> HavingExpr {
+        self.null_test(afterburner::ir::UnaryOperator::IsNull)
+    }
+
+    /// Requires the aggregate to be non-`NULL`.
+    pub fn is_not_null(self) -> HavingExpr {
+        self.null_test(afterburner::ir::UnaryOperator::IsNotNull)
     }
 }
 

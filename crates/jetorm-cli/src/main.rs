@@ -367,10 +367,13 @@ fn generate(args: &GenerateArgs) -> Result<ExitCode, String> {
     let contents = migration.to_toml().map_err(|error| error.to_string())?;
     let path = args.dir.join(format!("{version}.toml"));
     if path.exists() {
-        return Err(format!(
+        // A policy refusal, not an operational error: exit 1 like every
+        // other refusal, keeping 2 for broken environments.
+        eprintln!(
             "{} already exists; refusing to overwrite a migration",
             path.display()
-        ));
+        );
+        return Ok(ExitCode::FAILURE);
     }
     std::fs::write(&path, contents)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -448,13 +451,19 @@ async fn pull(args: PullArgs) -> Result<ExitCode, String> {
             skipped.table, skipped.column, skipped.data_type
         );
     }
+    for note in &introspection.notes {
+        eprintln!("note: {note}");
+    }
     if introspection.schema.is_empty() {
         println!("schema {} has no tables", args.db_schema);
         return Ok(ExitCode::SUCCESS);
     }
 
-    let source = codegen::entities_source(&introspection.schema);
-    std::fs::write(&args.out, source)
+    let generated = codegen::entities_source(&introspection.schema);
+    for warning in &generated.warnings {
+        eprintln!("warning: {warning}");
+    }
+    std::fs::write(&args.out, generated.source)
         .map_err(|error| format!("cannot write {}: {error}", args.out.display()))?;
     println!(
         "wrote {} with {} entities",

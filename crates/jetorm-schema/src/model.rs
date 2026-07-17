@@ -60,6 +60,8 @@ impl fmt::Display for TableName {
 pub struct ColumnDef {
     name: String,
     column_type: ColumnType,
+    #[serde(default)]
+    type_name: Option<String>,
     nullable: bool,
     unique: bool,
     auto_increment: bool,
@@ -72,10 +74,24 @@ impl ColumnDef {
         Self {
             name: name.into(),
             column_type,
+            type_name: None,
             nullable: false,
             unique: false,
             auto_increment: false,
         }
+    }
+
+    /// Clones this definition backed by a named database type.
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: impl Into<String>) -> Self {
+        self.type_name = Some(type_name.into());
+        self
+    }
+
+    /// Returns the named database type backing this column, when any.
+    #[must_use]
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
     }
 
     /// Clones this definition allowing SQL `NULL` values.
@@ -134,6 +150,7 @@ impl ColumnDef {
     #[must_use]
     pub fn same_shape(&self, other: &Self) -> bool {
         self.column_type == other.column_type
+            && self.type_name == other.type_name
             && self.nullable == other.nullable
             && self.unique == other.unique
             && self.auto_increment == other.auto_increment
@@ -332,6 +349,9 @@ impl TableDef {
         let mut table = Self::new(name);
         for column in E::COLUMNS {
             let mut definition = ColumnDef::new(column.name(), column.column_type());
+            if let Some(type_name) = column.type_name() {
+                definition = definition.with_type_name(type_name);
+            }
             if column.is_nullable() {
                 definition = definition.nullable();
             }
@@ -443,6 +463,9 @@ impl TableDef {
 pub struct SchemaSet {
     #[serde(with = "tables_as_sequence")]
     tables: BTreeMap<TableName, TableDef>,
+    /// Named enum types, each with its variants in declaration order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    enums: BTreeMap<String, Vec<String>>,
 }
 
 mod tables_as_sequence {
@@ -491,12 +514,48 @@ impl SchemaSet {
         self.tables.insert(table.name().clone(), table);
     }
 
-    /// Inserts the table described by an entity's metadata.
+    /// Inserts the table described by an entity's metadata, along with
+    /// every named enum type its columns require.
     pub fn insert_entity<E>(&mut self)
     where
         E: Entity,
     {
+        for meta in E::ENUMS {
+            if !meta.name().is_empty() {
+                self.insert_enum(
+                    meta.name(),
+                    meta.variants().iter().map(|&variant| variant.to_owned()),
+                );
+            }
+        }
         self.insert(TableDef::from_entity::<E>());
+    }
+
+    /// Inserts or replaces one named enum type.
+    pub fn insert_enum(
+        &mut self,
+        name: impl Into<String>,
+        variants: impl IntoIterator<Item = String>,
+    ) {
+        self.enums
+            .insert(name.into(), variants.into_iter().collect());
+    }
+
+    /// Returns one enum type's variants by name.
+    #[must_use]
+    pub fn enum_variants(&self, name: &str) -> Option<&[String]> {
+        self.enums.get(name).map(Vec::as_slice)
+    }
+
+    /// Iterates enum types in name order.
+    pub fn enums(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.enums
+            .iter()
+            .map(|(name, variants)| (name.as_str(), variants.as_slice()))
+    }
+
+    pub(crate) fn enums_mut(&mut self) -> &mut BTreeMap<String, Vec<String>> {
+        &mut self.enums
     }
 
     /// Returns one table by identity.

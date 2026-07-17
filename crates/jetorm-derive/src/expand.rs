@@ -174,7 +174,11 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             },
             |variant| quote!(#cr::ColumnType::#variant),
         );
-        let mut meta = quote!(#cr::ColumnMeta::new(#sql_name, #rust_name, #column_type));
+        let inner_for_name = &column.spec.inner;
+        let mut meta = quote!(
+            #cr::ColumnMeta::new(#sql_name, #rust_name, #column_type)
+                .with_type_name(<#inner_for_name as #cr::SqlValue>::TYPE_NAME)
+        );
         if column.spec.nullable {
             meta = quote!(#meta.nullable());
         }
@@ -188,6 +192,23 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             meta = quote!(#meta.unique());
         }
         meta
+    });
+
+    // One EnumMeta per native-enum column; schema tooling deduplicates by
+    // name. Non-enum columns contribute nothing because their TYPE_NAME is
+    // None — filtered at runtime by the collector, so the const list here
+    // simply includes every column's potential entry via a helper const.
+    let enum_metas = columns.iter().map(|column| {
+        let inner = &column.spec.inner;
+        quote! {
+            #cr::EnumMeta::new(
+                match <#inner as #cr::SqlValue>::TYPE_NAME {
+                    ::core::option::Option::Some(name) => name,
+                    ::core::option::Option::None => "",
+                },
+                <#inner as #cr::SqlValue>::ENUM_VARIANTS,
+            )
+        }
     });
 
     let primary_key_indices = columns
@@ -496,6 +517,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             const COLUMNS: &'static [#cr::ColumnMeta] = &[#(#column_metas),*];
             const PRIMARY_KEY: &'static [usize] = &[#(#primary_key_indices),*];
             const FOREIGN_KEYS: &'static [#cr::ForeignKeyRef] = &[#(#foreign_key_refs),*];
+            const ENUMS: &'static [#cr::EnumMeta] = &[#(#enum_metas),*];
         }
 
         #[automatically_derived]

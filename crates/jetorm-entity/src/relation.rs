@@ -110,6 +110,34 @@ impl ForeignKeyRef {
     }
 }
 
+/// One named database enum type, as value-level metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EnumMeta {
+    name: &'static str,
+    variants: &'static [&'static str],
+}
+
+impl EnumMeta {
+    /// Creates enum metadata from a type name and its variants in
+    /// declaration order.
+    #[must_use]
+    pub const fn new(name: &'static str, variants: &'static [&'static str]) -> Self {
+        Self { name, variants }
+    }
+
+    /// Returns the database type name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Returns the variant names in declaration order.
+    #[must_use]
+    pub const fn variants(&self) -> &'static [&'static str] {
+        self.variants
+    }
+}
+
 /// One named relation edge between two entities.
 ///
 /// Implementors are zero-sized marker types, exactly like columns: the edge

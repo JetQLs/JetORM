@@ -117,6 +117,57 @@ fn related_predicates_address_the_joined_entitys_columns() {
 }
 
 #[test]
+fn a_second_edge_joins_the_same_source_in_one_statement() {
+    let query = PostEntity::find()
+        .also::<post::Author>()
+        .also::<post::Editor>()
+        .filter_related1(user::Name.eq("alice"))
+        .order_by(post::Id.asc());
+    assert_eq!(query.binds(), [Value::Text("alice".to_owned())]);
+    let module = query
+        .clone()
+        .into_afterburner_ir()
+        .expect("two-edge join lowers");
+    let statement = Postgres
+        .render_query(&module)
+        .expect("two-edge join renders");
+    let sql = statement.sql();
+    assert_eq!(
+        sql.matches("LEFT JOIN").count(),
+        2,
+        "both edges join in one statement: {sql}"
+    );
+    assert!(
+        sql.contains("\"author__name\" = $1::text"),
+        "the first edge's filter addresses its own segment: {sql}"
+    );
+    assert!(
+        sql.contains("\"editor__id\"") && sql.contains("\"editor__name\""),
+        "the second edge's columns are aliased under its relation: {sql}"
+    );
+
+    // Shape separations: edge order matters (different column layouts),
+    // and neither collides with the single-edge join.
+    let reversed = PostEntity::find()
+        .also::<post::Editor>()
+        .also::<post::Author>();
+    assert_ne!(
+        PostEntity::find()
+            .also::<post::Author>()
+            .also::<post::Editor>()
+            .shape(),
+        reversed.shape()
+    );
+    assert_ne!(
+        PostEntity::find()
+            .also::<post::Author>()
+            .also::<post::Editor>()
+            .shape(),
+        PostEntity::find().also::<post::Author>().shape()
+    );
+}
+
+#[test]
 fn distinct_over_a_join_is_rejected_at_lowering() {
     let error = PostEntity::find()
         .distinct()

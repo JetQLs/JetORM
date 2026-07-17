@@ -11,7 +11,7 @@ use jetorm_entity::{Column, ColumnMeta, ColumnType, Entity, Relation, TableMeta}
 use crate::aggregate::{AggregateSpec, GroupedSelect};
 use crate::behavior::Exists;
 use crate::expr::{Predicate, SortKeySpec};
-use crate::join::JoinSelect;
+use crate::join::{Join2Select, JoinSelect};
 use crate::projection::ColumnList;
 use crate::select::{CountQuery, Select};
 
@@ -220,6 +220,18 @@ where
 
     fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
         lower_join(&self)
+    }
+}
+
+impl<R1, R2> IntoAfterBurnerIr for Join2Select<R1, R2>
+where
+    R1: Relation,
+    R2: Relation<Source = R1::Source>,
+{
+    type Error = LoweringError;
+
+    fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
+        lower_join2(&self)
     }
 }
 
@@ -588,6 +600,231 @@ where
         }
 
         let rows = lower_row_stages::<R::Source>(
+            &mut editor,
+            root,
+            filtered,
+            joined_type,
+            joined_types,
+            &RowPipeline {
+                filter: None,
+                distinct: false,
+                order: &join.select.order,
+                has_offset: join.select.offset.is_some(),
+                has_fetch: join.select.fetch.is_some(),
+                predicate_binds: join.select.binds.len(),
+            },
+        )?;
+        editor.append_operation(
+            root,
+            OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![rows.relation]),
+        )?;
+    }
+    Ok(module)
+}
+
+/// Appends one `LEFT JOIN` of a relation's target onto an existing
+/// relation whose leading fields are the source entity's columns.
+///
+/// Returns the joined relation, its type, and its field types. The
+/// condition block sees the rows with their original types; the output
+/// widens the target side, as null extension does.
+fn append_left_join<R>(
+    editor: &mut IrEditor<'_>,
+    root: BlockId,
+    left_relation: ValueId,
+    left_fields: &[Field],
+    left_types: &[Type],
+    source_key_position: usize,
+) -> Result<(ValueId, Type, Vec<Field>, Vec<Type>), LoweringError>
+where
+    R: Relation,
+{
+    let (target, _, target_types) = scan_entity::<R::Target>(editor, root)?;
+
+    let mut fields: Vec<Field> = left_fields.to_vec();
+    for column in R::Target::COLUMNS {
+        fields.push(Field::new(
+            format!("{}__{}", R::NAME, column.name()),
+            Type::Scalar(column_scalar_type(column).with_nullability(true)),
+        ));
+    }
+    let joined_types: Vec<Type> = fields.iter().map(|field| field.ty().clone()).collect();
+    let joined_schema = editor.intern_schema(Schema::new(fields.clone()));
+    let joined_type = Type::relation(joined_schema);
+
+    let join_op = editor.append_operation(
+        root,
+        OperationSpec::new(LogicalOp::Join {
+            kind: JoinKind::Left,
+            has_condition: true,
+        })
+        .with_operands(vec![left_relation, target])
+        .with_result(joined_type.clone()),
+    )?;
+    let region = editor.add_region(join_op)?;
+    let mut condition_types = left_types.to_vec();
+    condition_types.extend(target_types);
+    let block = editor.append_block(region, condition_types)?;
+    let left_key = (
+        editor.block_argument(block, source_key_position)?,
+        // The key may sit in an already-null-extended segment of the left
+        // row; its block-arg type is whatever the left row declares there.
+        Type::as_scalar(&left_types[source_key_position])
+            .expect("row fields are scalars")
+            .clone(),
+    );
+    let right_key = (
+        editor.block_argument(block, left_types.len() + <R::TargetColumn as Column>::INDEX)?,
+        column_scalar_type(&R::Target::COLUMNS[<R::TargetColumn as Column>::INDEX]),
+    );
+    let (left_value, right_value, unified) = unify_nullability(editor, block, left_key, right_key)?;
+    let equality = editor.append_operation(
+        block,
+        OperationSpec::new(ScalarOp::Binary(BinaryOperator::Equal))
+            .with_operands(vec![left_value, right_value])
+            .with_result(Type::scalar(SqlType::Boolean, unified.is_nullable())),
+    )?;
+    let predicate = editor.result(equality, 0)?;
+    editor.append_operation(
+        block,
+        OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate]),
+    )?;
+    Ok((
+        editor.result(join_op, 0)?,
+        joined_type,
+        fields,
+        joined_types,
+    ))
+}
+
+/// Lowers one two-edge join into a complete, unverified IR module.
+///
+/// Both edges join the source entity independently: the second join's
+/// condition addresses the source's key at its original leading position
+/// inside the once-joined row. Filters lower into one `WHERE` over the
+/// fully joined row — source at zero, first target after it, second
+/// target after that, each target widened to nullable.
+fn lower_join2<R1, R2>(join: &Join2Select<R1, R2>) -> Result<Module, LoweringError>
+where
+    R1: Relation,
+    R2: Relation<Source = R1::Source>,
+{
+    if join.select.distinct {
+        return Err(LoweringError::DistinctOverJoin);
+    }
+
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let (source, _, source_types) = scan_entity::<R1::Source>(&mut editor, root)?;
+        let source_fields: Vec<Field> = R1::Source::COLUMNS
+            .iter()
+            .map(|column| Field::new(column.name(), Type::Scalar(column_scalar_type(column))))
+            .collect();
+
+        let (joined1, _, fields1, types1) = append_left_join::<R1>(
+            &mut editor,
+            root,
+            source,
+            &source_fields,
+            &source_types,
+            <R1::SourceColumn as Column>::INDEX,
+        )?;
+        let (joined2, joined_type, _, joined_types) = append_left_join::<R2>(
+            &mut editor,
+            root,
+            joined1,
+            &fields1,
+            &types1,
+            <R2::SourceColumn as Column>::INDEX,
+        )?;
+
+        let source_width = R1::Source::COLUMNS.len();
+        let first_width = R1::Target::COLUMNS.len();
+        let mut filtered = joined2;
+        if join.select.filter.is_some()
+            || join.related_filter.is_some()
+            || join.second_filter.is_some()
+        {
+            let filter = editor.append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Filter)
+                    .with_operands(vec![filtered])
+                    .with_result(joined_type.clone()),
+            )?;
+            let region = editor.add_region(filter)?;
+            let block = editor.append_block(region, joined_types.clone())?;
+            let mut condition: Option<(ValueId, ScalarType)> = None;
+            let add = |editor: &mut IrEditor<'_>,
+                           condition: &mut Option<(ValueId, ScalarType)>,
+                           part: (ValueId, ScalarType)|
+             -> Result<(), LoweringError> {
+                *condition = Some(match condition.take() {
+                    None => part,
+                    Some(existing) => {
+                        let (left_value, right_value, unified) =
+                            unify_nullability(editor, block, existing, part)?;
+                        let both = editor.append_operation(
+                            block,
+                            OperationSpec::new(ScalarOp::Binary(BinaryOperator::And))
+                                .with_operands(vec![left_value, right_value])
+                                .with_result(Type::Scalar(unified.clone())),
+                        )?;
+                        (editor.result(both, 0)?, unified)
+                    }
+                });
+                Ok(())
+            };
+            if let Some(predicate) = join.select.filter.as_deref() {
+                let part = lower_node(
+                    &mut editor,
+                    block,
+                    predicate,
+                    &PredicateColumns::of_entity::<R1::Source>(),
+                )?;
+                add(&mut editor, &mut condition, part)?;
+            }
+            if let Some(predicate) = join.related_filter.as_deref() {
+                let part = lower_node(
+                    &mut editor,
+                    block,
+                    predicate,
+                    &PredicateColumns {
+                        types: R1::Target::COLUMNS
+                            .iter()
+                            .map(|column| column_scalar_type(column).with_nullability(true))
+                            .collect(),
+                        offset: source_width,
+                    },
+                )?;
+                add(&mut editor, &mut condition, part)?;
+            }
+            if let Some(predicate) = join.second_filter.as_deref() {
+                let part = lower_node(
+                    &mut editor,
+                    block,
+                    predicate,
+                    &PredicateColumns {
+                        types: R2::Target::COLUMNS
+                            .iter()
+                            .map(|column| column_scalar_type(column).with_nullability(true))
+                            .collect(),
+                        offset: source_width + first_width,
+                    },
+                )?;
+                add(&mut editor, &mut condition, part)?;
+            }
+            let (predicate_value, _) =
+                condition.expect("at least one predicate exists inside this branch");
+            editor.append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
+            )?;
+            filtered = editor.result(filter, 0)?;
+        }
+
+        let rows = lower_row_stages::<R1::Source>(
             &mut editor,
             root,
             filtered,

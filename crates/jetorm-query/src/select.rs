@@ -483,6 +483,53 @@ impl QueryShape {
         }
     }
 
+    /// Builds the shape of a two-edge join over a base select.
+    ///
+    /// The pair of relation markers identifies the join as one TypeId, so
+    /// `(Author, Editor)` and `(Editor, Author)` — different column
+    /// layouts — never share a statement, and neither collides with the
+    /// single-edge join over either relation.
+    pub(crate) fn for_join2<E>(
+        select: &Select<E>,
+        join: TypeId,
+        related_filter: Option<Arc<Predicate>>,
+        second_filter: Option<Arc<Predicate>>,
+    ) -> Self
+    where
+        E: Entity,
+    {
+        let entity = TypeId::of::<E>();
+        let has_offset = select.offset.is_some();
+        let has_fetch = select.fetch.is_some();
+
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        select.filter.hash(&mut hasher);
+        select.order.hash(&mut hasher);
+        (has_offset, has_fetch, select.distinct).hash(&mut hasher);
+        select.projection.hash(&mut hasher);
+        Some(join).hash(&mut hasher);
+        StatementKind::Select.hash(&mut hasher);
+        related_filter.hash(&mut hasher);
+        second_filter.hash(&mut hasher);
+
+        Self {
+            hash: hasher.finish(),
+            entity,
+            filter: select.filter.clone(),
+            order: select.order.clone(),
+            has_offset,
+            has_fetch,
+            distinct: select.distinct,
+            projection: select.projection.clone(),
+            kind: StatementKind::Select,
+            join: Some(join),
+            group: None,
+            related_filter,
+            having: second_filter,
+        }
+    }
+
     /// Builds the shape of a grouped aggregate over a base select.
     pub(crate) fn for_grouped<E>(
         select: &Select<E>,

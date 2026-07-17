@@ -55,8 +55,8 @@ pub use jetorm_entity::{
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
     CursorExecute, Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, ExistsExecute,
-    GroupedExecute, JetRow, JoinExecute, MutationExecute, PaginateExecute, Paginator, PlanCache,
-    ProjectedExecute, ReturningExecute, SelectExecute, Transaction, load_many, load_one,
+    GroupedExecute, JetRow, Join2Execute, JoinExecute, MutationExecute, PaginateExecute, Paginator,
+    PlanCache, ProjectedExecute, ReturningExecute, SelectExecute, Transaction, load_many, load_one,
 };
 pub use jetorm_query::{
     Aggregate, AggregateFunction, AggregateList, AggregateRef, AggregateSpec, Averageable,
@@ -75,8 +75,8 @@ pub mod prelude {
     };
     #[cfg(feature = "executor")]
     pub use crate::{
-        CursorExecute, Database, ExistsExecute, GroupedExecute, JoinExecute, MutationExecute,
-        PaginateExecute, ProjectedExecute, ReturningExecute, SelectExecute, Transaction, load_many,
-        load_one,
+        CursorExecute, Database, ExistsExecute, GroupedExecute, Join2Execute, JoinExecute,
+        MutationExecute, PaginateExecute, ProjectedExecute, ReturningExecute, SelectExecute,
+        Transaction, load_many, load_one,
     };
 }

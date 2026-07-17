@@ -119,6 +119,42 @@ async fn joins_pair_rows_with_their_relation_in_one_query() {
 
 #[tokio::test]
 #[ignore = "requires a running Docker daemon"]
+async fn both_edges_fetch_in_one_query() {
+    let (_container, db) = fresh_database().await;
+    seed(&db).await;
+
+    let rows = PostEntity::find()
+        .also::<post::Author>()
+        .also::<post::Editor>()
+        .order_by(post::Id.asc())
+        .all(&db)
+        .await
+        .expect("two-edge join fetches");
+    let triples: Vec<(&str, Option<&str>, Option<&str>)> = rows
+        .iter()
+        .map(|(post, author, editor)| {
+            (
+                post.title.as_str(),
+                author.as_ref().map(|user| user.name.as_str()),
+                editor.as_ref().map(|user| user.name.as_str()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        triples,
+        [
+            ("intro", Some("alice"), Some("bob")),
+            ("part one", Some("alice"), None),
+            ("aside", Some("bob"), None),
+        ],
+        "each edge matches independently, NULL keys null-extend per edge"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
 async fn related_predicates_filter_and_order_on_the_joined_side() {
     let (_container, db) = fresh_database().await;
     seed(&db).await;

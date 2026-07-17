@@ -605,3 +605,39 @@ async fn constraint_failures_classify_without_driver_coupling() {
 
     db.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
+async fn membership_fetches_exactly_the_listed_keys() {
+    let (_container, db) = fresh_database().await;
+    create_fixture(&db).await;
+
+    // The batch-loader primitive: one array bind, any number of keys.
+    let users = UserEntity::find()
+        .filter(Id.is_in([1_i64, 3]))
+        .order_by(Id.asc())
+        .all(&db)
+        .await
+        .expect("membership select executes");
+    let names: Vec<&str> = users.iter().map(|user| user.name.as_str()).collect();
+    assert_eq!(names, ["alice", "carol"]);
+
+    // An empty key list matches nothing rather than failing.
+    let none = UserEntity::find()
+        .filter(Id.is_in(Vec::<i64>::new()))
+        .all(&db)
+        .await
+        .expect("empty membership executes");
+    assert!(none.is_empty());
+
+    // Text membership takes the same path through its own array type.
+    let by_name = UserEntity::find()
+        .filter(Name.is_in(["bob", "carol"]))
+        .order_by(Id.asc())
+        .all(&db)
+        .await
+        .expect("text membership executes");
+    assert_eq!(by_name.len(), 2);
+
+    db.close().await;
+}

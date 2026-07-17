@@ -668,6 +668,10 @@ fn hash_sql_type(hasher: &mut StableHasher, ty: &SqlType) {
             hasher.tag(12);
             hasher.string(name);
         }
+        SqlType::Array { element } => {
+            hasher.tag(13);
+            hash_sql_type(hasher, element);
+        }
     }
 }
 
@@ -778,6 +782,7 @@ fn binary_tag(value: BinaryOperator) -> u8 {
         BinaryOperator::Like => 14,
         BinaryOperator::CaseInsensitiveLike => 15,
         BinaryOperator::IsDistinctFrom => 16,
+        BinaryOperator::InArray => 17,
     }
 }
 

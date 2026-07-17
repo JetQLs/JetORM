@@ -41,6 +41,13 @@ pub enum Value {
     Uuid(Uuid),
     /// Structured JSON value.
     Json(serde_json::Value),
+    /// Homogeneous array value, above all for `IN`-style membership binds.
+    Array {
+        /// Kind of every element.
+        element: ColumnType,
+        /// Elements in order; each holds the declared element kind.
+        values: Vec<Value>,
+    },
 }
 
 impl Value {
@@ -63,6 +70,9 @@ impl Value {
             Self::TimestampUtc(_) => ColumnType::TimestampUtc,
             Self::Uuid(_) => ColumnType::Uuid,
             Self::Json(_) => ColumnType::Json,
+            // Columns cannot hold arrays yet, so an array value reports the
+            // kind of its elements — the type a membership test compares.
+            Self::Array { element, .. } => *element,
         }
     }
 
@@ -91,6 +101,7 @@ impl Value {
             Self::TimestampUtc(_) => "timestamp with time zone",
             Self::Uuid(_) => "uuid",
             Self::Json(_) => "json",
+            Self::Array { .. } => "array",
         }
     }
 }

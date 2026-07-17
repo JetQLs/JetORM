@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use jetorm_dialect::Statement;
-use jetorm_entity::{ColumnMeta, ColumnType, Value};
+use jetorm_entity::{ColumnMeta, ColumnType, SqlValue, Value};
 use sqlx::Row;
 use sqlx::postgres::{PgArguments, PgRow};
 use uuid::Uuid;
@@ -21,14 +21,18 @@ pub(crate) fn build_query<'statement>(
             .ok_or(ExecuteError::MissingBind {
                 position: *position,
             })?;
-        query = bind_value(query, value);
+        query = bind_value(query, value, *position)?;
     }
     Ok(query)
 }
 
 /// Binds one runtime value through its exact PostgreSQL type.
-fn bind_value<'query>(query: PgQuery<'query>, value: &Value) -> PgQuery<'query> {
-    match value {
+fn bind_value<'query>(
+    query: PgQuery<'query>,
+    value: &Value,
+    position: u32,
+) -> Result<PgQuery<'query>, ExecuteError> {
+    Ok(match value {
         Value::Null(column_type) => bind_null(query, *column_type),
         Value::Boolean(value) => query.bind(*value),
         Value::Int16(value) => query.bind(*value),
@@ -44,7 +48,49 @@ fn bind_value<'query>(query: PgQuery<'query>, value: &Value) -> PgQuery<'query> 
         Value::TimestampUtc(value) => query.bind(*value),
         Value::Uuid(value) => query.bind(*value),
         Value::Json(value) => query.bind(value.clone()),
+        Value::Array { element, values } => bind_array(query, *element, values, position)?,
+    })
+}
+
+/// Binds a homogeneous array as one PostgreSQL array parameter.
+///
+/// The query layer constructs arrays through typed conversion, so every
+/// element already holds the declared kind; a stray mismatch is reported as
+/// a malformed bind rather than silently coerced.
+fn bind_array<'query>(
+    query: PgQuery<'query>,
+    element: ColumnType,
+    values: &[Value],
+    position: u32,
+) -> Result<PgQuery<'query>, ExecuteError> {
+    fn collect<T: SqlValue>(values: &[Value], position: u32) -> Result<Vec<T>, ExecuteError> {
+        values
+            .iter()
+            .map(|value| {
+                T::from_value(value.clone()).map_err(|mismatch| ExecuteError::MalformedBind {
+                    position,
+                    detail: mismatch.to_string(),
+                })
+            })
+            .collect()
     }
+
+    Ok(match element {
+        ColumnType::Boolean => query.bind(collect::<bool>(values, position)?),
+        ColumnType::Int16 => query.bind(collect::<i16>(values, position)?),
+        ColumnType::Int32 => query.bind(collect::<i32>(values, position)?),
+        ColumnType::Int64 => query.bind(collect::<i64>(values, position)?),
+        ColumnType::Float32 => query.bind(collect::<f32>(values, position)?),
+        ColumnType::Float64 => query.bind(collect::<f64>(values, position)?),
+        ColumnType::Text => query.bind(collect::<String>(values, position)?),
+        ColumnType::Bytes => query.bind(collect::<Vec<u8>>(values, position)?),
+        ColumnType::Date => query.bind(collect::<NaiveDate>(values, position)?),
+        ColumnType::Time => query.bind(collect::<NaiveTime>(values, position)?),
+        ColumnType::Timestamp => query.bind(collect::<NaiveDateTime>(values, position)?),
+        ColumnType::TimestampUtc => query.bind(collect::<DateTime<Utc>>(values, position)?),
+        ColumnType::Uuid => query.bind(collect::<Uuid>(values, position)?),
+        ColumnType::Json => query.bind(collect::<serde_json::Value>(values, position)?),
+    })
 }
 
 /// Binds SQL `NULL` with the driver-visible type of its column.

@@ -222,7 +222,14 @@ fn lower_node(
             Ok((value, column_scalar_type(&columns[*index])))
         }
         Predicate::Bind { position, ty } => {
-            let ty = ScalarType::new(sql_type(ty.column_type), ty.nullable);
+            let kind = if ty.list {
+                SqlType::Array {
+                    element: Box::new(sql_type(ty.column_type)),
+                }
+            } else {
+                sql_type(ty.column_type)
+            };
+            let ty = ScalarType::new(kind, ty.nullable);
             let parameter = editor.append_operation(
                 block,
                 OperationSpec::new(ScalarOp::Parameter {
@@ -252,20 +259,29 @@ fn lower_node(
         Predicate::Binary { op, left, right } => {
             let (left_value, left_ty) = lower_node(editor, block, left, columns)?;
             let (right_value, right_ty) = lower_node(editor, block, right, columns)?;
-            let (left_value, right_value, operand_ty) = unify_nullability(
-                editor,
-                block,
-                (left_value, left_ty),
-                (right_value, right_ty),
-            )?;
-            let result_ty = binary_result_type(*op, &operand_ty);
+            // Membership pairs a scalar with an array of its kind, so the
+            // operand-unification rule for symmetric operators cannot apply.
+            let (left_value, right_value, operand_ty) = if *op == BinaryOperator::InArray {
+                let result = ScalarType::new(SqlType::Boolean, left_ty.is_nullable());
+                let _ = right_ty;
+                (left_value, right_value, result)
+            } else {
+                let (left_value, right_value, unified) = unify_nullability(
+                    editor,
+                    block,
+                    (left_value, left_ty),
+                    (right_value, right_ty),
+                )?;
+                let result = binary_result_type(*op, &unified);
+                (left_value, right_value, result)
+            };
             let operation = editor.append_operation(
                 block,
                 OperationSpec::new(ScalarOp::Binary(*op))
                     .with_operands(vec![left_value, right_value])
-                    .with_result(Type::Scalar(result_ty.clone())),
+                    .with_result(Type::Scalar(operand_ty.clone())),
             )?;
-            Ok((editor.result(operation, 0)?, result_ty))
+            Ok((editor.result(operation, 0)?, operand_ty))
         }
     }
 }
@@ -325,7 +341,8 @@ fn binary_result_type(op: BinaryOperator, operand: &ScalarType) -> ScalarType {
     match op {
         // Null-safe distinctness is total: it never returns SQL NULL.
         BinaryOperator::IsDistinctFrom => ScalarType::new(SqlType::Boolean, false),
-        BinaryOperator::Equal
+        BinaryOperator::InArray
+        | BinaryOperator::Equal
         | BinaryOperator::NotEqual
         | BinaryOperator::LessThan
         | BinaryOperator::LessThanOrEqual

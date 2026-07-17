@@ -280,3 +280,29 @@ fn substring_operators_escape_like_metacharacters() {
     let suffix = UserEntity::find().filter(Name.ends_with("100%"));
     assert_eq!(suffix.binds(), [Value::Text(r"%100\%".to_owned())]);
 }
+
+#[test]
+fn is_in_binds_the_whole_list_as_one_array() {
+    let query = UserEntity::find().filter(Id.is_in([1_i64, 3, 5]));
+    assert_eq!(
+        query.binds(),
+        [Value::Array {
+            element: jetorm_entity::ColumnType::Int64,
+            values: vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
+        }]
+    );
+    afterburner!(query).expect("membership predicate lowers to verified IR");
+}
+
+#[test]
+fn every_list_length_shares_one_query_shape() {
+    // The reason membership is an array parameter: a batch loader fetching
+    // 1, 3, or 300 parents must not mint distinct statements per length.
+    let two = UserEntity::find().filter(Id.is_in([1_i64, 2]));
+    let five = UserEntity::find().filter(Id.is_in([1_i64, 2, 3, 4, 5]));
+    let empty = UserEntity::find().filter(Id.is_in(Vec::<i64>::new()));
+    assert_eq!(two.shape(), five.shape());
+    assert_eq!(two.shape(), empty.shape());
+
+    afterburner!(empty).expect("an empty list still lowers to verified IR");
+}

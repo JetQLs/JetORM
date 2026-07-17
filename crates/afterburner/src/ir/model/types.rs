@@ -159,6 +159,17 @@ pub enum SqlType {
     Json,
     /// A frontend or database-specific scalar retained until dialect lowering.
     Custom(String),
+    /// Ordered collection of one element kind.
+    ///
+    /// Arrays currently appear as parameter and expression types — above all
+    /// as the right operand of [`super::BinaryOperator::InArray`], where one
+    /// bound array keeps a membership test's structure independent of how
+    /// many elements it holds. Element nullability is not tracked: SQL
+    /// arrays may contain nulls regardless.
+    Array {
+        /// Kind of every element.
+        element: Box<SqlType>,
+    },
 }
 
 /// Compiler-oriented alias for [`SqlType`].

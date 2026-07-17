@@ -13,6 +13,8 @@ use jetorm_entity::{Column, ColumnType, Entity, SqlValue, Value};
 pub(crate) struct OperandType {
     pub(crate) column_type: ColumnType,
     pub(crate) nullable: bool,
+    /// Whether the operand is an array of `column_type` elements.
+    pub(crate) list: bool,
 }
 
 impl OperandType {
@@ -25,6 +27,7 @@ impl OperandType {
         Self {
             column_type: meta.column_type(),
             nullable: meta.is_nullable(),
+            list: false,
         }
     }
 }
@@ -281,6 +284,37 @@ pub trait ColumnExt: Column + Sized {
     #[must_use]
     fn is_not_null(self) -> Expr<Self::Entity, bool> {
         null_test::<Self>(UnaryOperator::IsNotNull)
+    }
+
+    /// Builds a membership predicate over a list of values.
+    ///
+    /// The whole list binds as one array parameter, so every list length
+    /// shares one query shape and one prepared statement — a paginated
+    /// batch loader cannot flood the plan cache. An empty list matches no
+    /// rows.
+    #[must_use]
+    fn is_in<I>(self, values: I) -> Expr<Self::Entity, bool>
+    where
+        I: IntoIterator,
+        I::Item: Into<Self::Rust>,
+    {
+        let element = <Self::Rust as SqlValue>::COLUMN_TYPE;
+        let values: Vec<Value> = values
+            .into_iter()
+            .map(|value| value.into().into_value())
+            .collect();
+        Expr::from_node(Node::Binary {
+            op: BinaryOperator::InArray,
+            left: Box::new(Node::Column(Self::INDEX)),
+            right: Box::new(Node::Value {
+                value: Value::Array { element, values },
+                ty: OperandType {
+                    column_type: element,
+                    nullable: false,
+                    list: true,
+                },
+            }),
+        })
     }
 
     /// Builds an inclusive range predicate: `low <= column <= high`.

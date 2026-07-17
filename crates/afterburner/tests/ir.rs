@@ -918,3 +918,106 @@ fn limit_fingerprint_depends_on_operand_presence_not_values() {
     let offset_only = structural_fingerprint(&build_limit_module(true, false, i64_type())).unwrap();
     assert_ne!(first, offset_only);
 }
+
+/// Builds `scan -> filter(id = ANY($0)) -> return` with the given array
+/// element kind for the parameter.
+fn build_membership_module(element: SqlType) -> Module {
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let schema = editor.intern_schema(Schema::new(vec![Field::new("id", i64_type())]));
+        let relation = Type::relation(schema);
+        let scan = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Scan {
+                    table: afterburner::ir::TableRef::new("items"),
+                    columns: vec!["id".into()],
+                })
+                .with_result(relation.clone()),
+            )
+            .unwrap();
+        let scanned = editor.result(scan, 0).unwrap();
+        let filter = editor
+            .append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Filter)
+                    .with_operands(vec![scanned])
+                    .with_result(relation),
+            )
+            .unwrap();
+        let region = editor.add_region(filter).unwrap();
+        let block = editor.append_block(region, vec![i64_type()]).unwrap();
+        let id = editor.block_argument(block, 0).unwrap();
+        let list = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::Parameter {
+                    position: 0,
+                    name: None,
+                })
+                .with_result(Type::scalar(
+                    SqlType::Array {
+                        element: Box::new(element),
+                    },
+                    false,
+                )),
+            )
+            .unwrap();
+        let list_value = editor.result(list, 0).unwrap();
+        let membership = editor
+            .append_operation(
+                block,
+                OperationSpec::new(ScalarOp::Binary(BinaryOperator::InArray))
+                    .with_operands(vec![id, list_value])
+                    .with_result(Type::boolean(false)),
+            )
+            .unwrap();
+        let predicate = editor.result(membership, 0).unwrap();
+        editor
+            .append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate]),
+            )
+            .unwrap();
+        let filtered = editor.result(filter, 0).unwrap();
+        editor
+            .append_operation(
+                root,
+                OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![filtered]),
+            )
+            .unwrap();
+    }
+    module
+}
+
+#[test]
+fn in_array_requires_an_array_of_the_scalar_kind() {
+    let matching = build_membership_module(SqlType::Integer {
+        bits: 64,
+        signed: true,
+    });
+    verify_module(&matching).expect("matching element kind verifies");
+
+    let mismatched = build_membership_module(SqlType::Utf8);
+    let errors = verify_module(&mismatched).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message().contains("array operand of the scalar"))
+    );
+}
+
+#[test]
+fn in_array_fingerprint_is_independent_of_bound_list_contents() {
+    let element = SqlType::Integer {
+        bits: 64,
+        signed: true,
+    };
+    // The list itself is a parameter, so the module carries no trace of how
+    // many keys a caller binds: both prints are equal by construction.
+    let first = structural_fingerprint(&build_membership_module(element.clone())).unwrap();
+    let second = structural_fingerprint(&build_membership_module(element)).unwrap();
+    assert_eq!(first, second);
+}

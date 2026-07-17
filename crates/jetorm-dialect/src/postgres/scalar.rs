@@ -176,6 +176,13 @@ fn render_scalar_op(
                 UnaryOperator::IsNotNull => format!("({operand} IS NOT NULL)"),
             })
         }
+        ScalarOp::Binary(BinaryOperator::InArray) => {
+            let left = operand_sql(module, params, scope, operands, 0)?;
+            let right = operand_sql(module, params, scope, operands, 1)?;
+            // `= ANY` takes the array as a single value, so one bound array
+            // parameter serves any number of elements with one statement.
+            Ok(format!("({left} = ANY({right}))"))
+        }
         ScalarOp::Binary(operator) => {
             let left = operand_sql(module, params, scope, operands, 0)?;
             let right = operand_sql(module, params, scope, operands, 1)?;
@@ -302,6 +309,8 @@ const fn binary_operator_sql(operator: BinaryOperator) -> &'static str {
         BinaryOperator::Like => "LIKE",
         BinaryOperator::CaseInsensitiveLike => "ILIKE",
         BinaryOperator::IsDistinctFrom => "IS DISTINCT FROM",
+        // Rendered structurally as `left = ANY(right)`, never as infix.
+        BinaryOperator::InArray => panic!("in-array has a dedicated rendering"),
     }
 }
 

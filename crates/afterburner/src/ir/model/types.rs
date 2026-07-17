@@ -127,8 +127,13 @@ pub enum SqlType {
         bits: u16,
     },
     /// Exact fixed-point decimal.
+    ///
+    /// Precision zero with scale zero denotes an unconstrained decimal —
+    /// arbitrary exact numerics with no declared limit, SQL's bare
+    /// `NUMERIC`. Renderers spell it without a precision so no cast ever
+    /// rounds a value.
     Decimal {
-        /// Total significant decimal digits.
+        /// Total significant decimal digits; zero for unconstrained.
         precision: u16,
         /// Digits to the right of the decimal point; negative scales are allowed.
         scale: i16,

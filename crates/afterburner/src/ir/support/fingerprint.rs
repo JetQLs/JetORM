@@ -94,7 +94,8 @@ pub fn structural_fingerprint(module: &Module) -> Result<StructuralFingerprint, 
         next_block: 0,
         schema_stack: HashSet::new(),
     };
-    context.hasher.bytes(b"afterburner-ir-v1");
+    // v2: Limit encodes operand-presence booleans instead of inline counts.
+    context.hasher.bytes(b"afterburner-ir-v2");
     context.hash_region(module.root_region())?;
     Ok(StructuralFingerprint(context.hasher.finish().to_be_bytes()))
 }
@@ -277,10 +278,13 @@ impl FingerprintContext<'_> {
                     hash_sort_key(&mut self.hasher, *key);
                 }
             }
-            LogicalOp::Limit { offset, fetch } => {
+            LogicalOp::Limit {
+                has_offset,
+                has_fetch,
+            } => {
                 self.hasher.tag(9);
-                self.hasher.optional_u64(*offset);
-                self.hasher.optional_u64(*fetch);
+                self.hasher.boolean(*has_offset);
+                self.hasher.boolean(*has_fetch);
             }
             LogicalOp::Distinct => self.hasher.tag(10),
             LogicalOp::Set { operator, all } => {
@@ -467,7 +471,7 @@ impl FingerprintContext<'_> {
 ///
 /// Tags, field order, integer endianness, and the top-level domain separator form
 /// the persisted fingerprint format. Any incompatible encoding change must also
-/// change the `afterburner-ir-v1` domain string.
+/// change the `afterburner-ir-v2` domain string.
 struct StableHasher {
     state: u128,
 }
@@ -527,13 +531,6 @@ impl StableHasher {
 
     fn u64(&mut self, value: u64) {
         self.raw_bytes(&value.to_le_bytes());
-    }
-
-    fn optional_u64(&mut self, value: Option<u64>) {
-        self.boolean(value.is_some());
-        if let Some(value) = value {
-            self.u64(value);
-        }
     }
 
     fn i128(&mut self, value: i128) {

@@ -377,8 +377,16 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &Ui) {
         .rows
         .iter()
         .map(|row| {
-            let marker = if row.applied { "✓" } else { "…" };
-            let mut spans = vec![Span::raw(format!("{marker} {}", row.version))];
+            // Plain words over symbols: states must be readable at a
+            // glance, not decoded.
+            let mut spans = vec![
+                if row.applied {
+                    Span::styled(" applied ", Style::default().fg(Color::Green))
+                } else {
+                    Span::styled(" pending ", Style::default().fg(Color::Yellow))
+                },
+                Span::raw(row.version.clone()),
+            ];
             if row.destructive {
                 spans.push(Span::styled(
                     "  destructive",

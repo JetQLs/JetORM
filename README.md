@@ -166,6 +166,25 @@ let changed: u64 = PostEntity::update()
 PostEntity::delete().filter(post::Id.eq(7)).execute(&db).await?;
 ```
 
+**Upserts** — choose the conflict arbiter and what a conflict does:
+
+```rust
+// Explicit arbiter and update list:
+ItemEntity::insert(item)
+    .on_conflict((item::Sku,))
+    .update_columns((item::Price,))     // ON CONFLICT ("sku") DO UPDATE SET "price" = EXCLUDED."price"
+    .returning().all(&db).await?;
+ItemEntity::insert(item).on_conflict((item::Sku,)).ignore().execute(&db).await?;
+
+// Natural-key convenience: insert or update every non-key column.
+SettingEntity::upsert(setting).execute(&db).await?;
+```
+
+Nonsense is refused before the database sees it: assigning a target
+column to itself, assigning a generated column, or arbitrating on an
+auto-incrementing key (which is never inserted, so it could never
+conflict) are lowering errors.
+
 An update or delete **without a filter refuses to run** unless you write
 `.all_rows()` — unbounded writes are said in code, not assumed.
 Transactions: `let mut tx = db.begin().await?;` then pass `&mut tx`

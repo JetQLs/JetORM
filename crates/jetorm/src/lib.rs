@@ -62,8 +62,8 @@ pub use jetorm_query::{
     Aggregate, AggregateFunction, AggregateList, AggregateRef, AggregateSpec, Averageable,
     CacheableQuery, ColumnExt, ColumnList, Comparable, CountQuery, Cursor, CursorPage, Delete,
     EntityMutation, EntityQuery, Exists, Expr, GroupBy, GroupedSelect, HavingExpr, Insert,
-    JoinSelect, LoweringError, OrderKey, Projected, Returning, Select, Summable, TextColumnExt,
-    Update, avg, count_rows, max, min, sum,
+    JoinSelect, LoweringError, OnConflict, OrderKey, Projected, Returning, Select, Summable,
+    TextColumnExt, Update, avg, count_rows, max, min, sum,
 };
 
 /// Single-import surface for application code.

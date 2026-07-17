@@ -106,16 +106,21 @@ fn insert_upsert_and_returning_have_explicit_result_contracts() {
             .ends_with("RETURNING \"id\", \"name\", \"email\"")
     );
 
-    let upsert = render(
+    // A generated key never appears in the inserted columns, so a
+    // key-arbitrated upsert on this entity could never conflict — the
+    // dead update arm is refused rather than silently emitted.
+    let upsert = jetorm::afterburner!(
         UserEntity::insert(User {
             id: 0,
             name: "upsert".to_owned(),
             email: None,
         })
-        .on_conflict_update(),
-    );
-    assert!(upsert.sql().contains(
-        "ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\", \"email\" = EXCLUDED.\"email\""
+        .on_conflict_update()
+    )
+    .expect_err("a generated key cannot arbitrate");
+    assert!(matches!(
+        upsert,
+        AfterBurnerError::Lowering(LoweringError::UpsertKeyGenerated { .. })
     ));
 }
 

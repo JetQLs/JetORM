@@ -86,7 +86,7 @@ pub use cursor::{Cursor, CursorKey, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use join::{Join2Select, JoinSelect};
 pub use lowering::LoweringError;
-pub use mutation::{Delete, EntityMutation, Insert, Returning, Update};
+pub use mutation::{Delete, EntityMutation, Insert, OnConflict, Returning, Update};
 pub use projection::{ColumnList, Projected};
 pub use select::{CacheableQuery, CountQuery, EntityQuery, QueryShape, Select};
 

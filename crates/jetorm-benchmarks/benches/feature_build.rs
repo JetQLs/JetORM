@@ -613,6 +613,85 @@ fn array_filter_build(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// One-row upsert: `INSERT ... ON CONFLICT (email) DO UPDATE SET name`.
+fn upsert_build(criterion: &mut Criterion) {
+    use jet::user;
+
+    let mut group = criterion.benchmark_group("upsert_build");
+
+    let jet_user = || jet::User {
+        id: 0,
+        name: "alice".to_owned(),
+        email: Some("alice@example.com".to_owned()),
+    };
+    let jetorm_upsert = || {
+        jet::UserEntity::insert(jet_user())
+            .on_conflict((user::Email,))
+            .update_columns((user::Name,))
+    };
+
+    group.bench_function("jetorm_cold", |bencher| {
+        bencher.iter(|| {
+            let cache = PlanCache::new();
+            let mutation = jetorm_upsert();
+            let statement = cache.statement(&mutation).expect("miss renders");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("jetorm_warm", |bencher| {
+        let cache = PlanCache::new();
+        cache
+            .statement(&jetorm_upsert())
+            .expect("statement renders on the first call");
+        bencher.iter(|| {
+            let mutation = jetorm_upsert();
+            let statement = cache.statement(&mutation).expect("cache resolves");
+            black_box((statement.sql().len(), mutation.binds().len()))
+        });
+    });
+
+    group.bench_function("seaorm", |bencher| {
+        use sea_orm::sea_query::OnConflict;
+        use sea_orm::{ActiveValue, DbBackend, EntityTrait, QueryTrait};
+        bencher.iter(|| {
+            let row = sea_user::ActiveModel {
+                id: ActiveValue::NotSet,
+                name: ActiveValue::Set("alice".to_owned()),
+                email: ActiveValue::Set(Some("alice@example.com".to_owned())),
+            };
+            let statement = sea_user::Entity::insert(row)
+                .on_conflict(
+                    OnConflict::column(sea_user::Column::Email)
+                        .update_column(sea_user::Column::Name)
+                        .to_owned(),
+                )
+                .build(DbBackend::Postgres);
+            black_box((
+                statement.sql.len(),
+                statement.values.as_ref().map_or(0, |values| values.0.len()),
+            ))
+        });
+    });
+
+    group.bench_function("diesel", |bencher| {
+        use diesel::pg::Pg;
+        use diesel::prelude::*;
+        use diesel::upsert::excluded;
+        use schema::users::dsl::{email, name, users};
+        bencher.iter(|| {
+            let query = diesel::insert_into(users)
+                .values((name.eq("alice"), email.eq(Some("alice@example.com"))))
+                .on_conflict(email)
+                .do_update()
+                .set(name.eq(excluded(name)));
+            black_box(diesel::debug_query::<Pg, _>(&query).to_string().len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     count_build,
@@ -621,6 +700,7 @@ criterion_group!(
     insert_build,
     update_build,
     array_insert_build,
-    array_filter_build
+    array_filter_build,
+    upsert_build
 );
 criterion_main!(benches);

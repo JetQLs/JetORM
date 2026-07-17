@@ -72,7 +72,7 @@ mod value;
 
 pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::{ErrorKind, ExecuteError};
-pub use join::JoinExecute;
+pub use join::{Join2Execute, JoinExecute};
 pub use mutation::{MutationExecute, ReturningExecute};
 pub use paginate::{CursorExecute, PaginateExecute, Paginator};
 pub use plan::PlanCache;

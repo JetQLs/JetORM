@@ -84,7 +84,7 @@ pub use aggregate::{
 pub use behavior::Exists;
 pub use cursor::{Cursor, CursorKey, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
-pub use join::JoinSelect;
+pub use join::{Join2Select, JoinSelect};
 pub use lowering::LoweringError;
 pub use mutation::{Delete, EntityMutation, Insert, Returning, Update};
 pub use projection::{ColumnList, Projected};

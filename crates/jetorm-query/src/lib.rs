@@ -98,6 +98,8 @@ pub trait SqlValueTyping {
     const COLUMN_TYPE_OF: jetorm_entity::ColumnType;
     /// Whether the Rust type itself models SQL `NULL`.
     const NULLABLE_OF: bool;
+    /// Named database type backing the Rust type, when one exists.
+    const TYPE_NAME_OF: Option<&'static str>;
 }
 
 impl<T> SqlValueTyping for T
@@ -106,4 +108,5 @@ where
 {
     const COLUMN_TYPE_OF: jetorm_entity::ColumnType = T::COLUMN_TYPE;
     const NULLABLE_OF: bool = T::NULLABLE;
+    const TYPE_NAME_OF: Option<&'static str> = T::TYPE_NAME;
 }

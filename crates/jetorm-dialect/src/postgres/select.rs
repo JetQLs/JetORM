@@ -155,7 +155,53 @@ impl<'module> Renderer<'module> {
             .ok_or_else(|| RenderError::inconsistent("query return has no operand"))?;
         let source = self.defining_operation(returned)?;
         let builder = self.build_relation(source)?;
-        builder.render()
+        let sql = builder.render()?;
+        self.finish_wire(sql, returned)
+    }
+
+    /// Wraps the finished query so named-type outputs cross the driver
+    /// boundary as text.
+    ///
+    /// JetORM's wire contract is dialect-independent values; a native enum
+    /// column is enum-typed inside the statement — comparisons and
+    /// ordering keep its own semantics — and text at the very edge, where
+    /// the driver decodes it.
+    fn finish_wire(&mut self, sql: String, returned: ValueId) -> Result<String, RenderError> {
+        let schema = self
+            .module
+            .value(returned)
+            .map(afterburner::ir::Value::ty)
+            .and_then(Type::as_relation)
+            .and_then(|schema| self.module.schema(schema))
+            .ok_or_else(|| RenderError::inconsistent("returned relation schema is stale"))?;
+        let has_custom = schema.fields().iter().any(|field| {
+            matches!(
+                field.ty(),
+                Type::Scalar(scalar) if matches!(scalar.kind(), afterburner::ir::SqlType::Custom(_))
+            )
+        });
+        if !has_custom {
+            return Ok(sql);
+        }
+        let alias = self.next_alias();
+        let alias_sql = quote_identifier(&alias)?;
+        let mut projection = Vec::with_capacity(schema.fields().len());
+        for field in schema.fields() {
+            let column = quote_identifier(field.name())?;
+            let is_custom = matches!(
+                field.ty(),
+                Type::Scalar(scalar) if matches!(scalar.kind(), afterburner::ir::SqlType::Custom(_))
+            );
+            if is_custom {
+                projection.push(format!("{alias_sql}.{column}::text AS {column}"));
+            } else {
+                projection.push(format!("{alias_sql}.{column}"));
+            }
+        }
+        Ok(format!(
+            "SELECT {} FROM ({sql}) AS {alias_sql}",
+            projection.join(", ")
+        ))
     }
 
     fn build_relation(&mut self, operation_id: OperationId) -> Result<SelectBuilder, RenderError> {

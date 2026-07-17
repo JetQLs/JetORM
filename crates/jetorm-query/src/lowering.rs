@@ -1248,12 +1248,16 @@ fn lower_node(
             Ok((value, columns.types[*index].clone()))
         }
         Predicate::Bind { position, ty } => {
+            let element = match ty.type_name {
+                Some(name) => SqlType::Custom(name.to_owned()),
+                None => sql_type(ty.column_type),
+            };
             let kind = if ty.list {
                 SqlType::Array {
-                    element: Box::new(sql_type(ty.column_type)),
+                    element: Box::new(element),
                 }
             } else {
-                sql_type(ty.column_type)
+                element
             };
             let ty = ScalarType::new(kind, ty.nullable);
             let parameter = editor.append_operation(
@@ -1420,7 +1424,14 @@ pub(super) fn table_ref(table: &TableMeta) -> TableRef {
 }
 
 pub(super) fn column_scalar_type(column: &ColumnMeta) -> ScalarType {
-    ScalarType::new(sql_type(column.column_type()), column.is_nullable())
+    // A named type — a native enum — is its own IR type: comparisons then
+    // type-check against it, binds cast to it, and the dialect knows to
+    // hand its outputs to the driver as text.
+    let kind = match column.type_name() {
+        Some(name) => SqlType::Custom(name.to_owned()),
+        None => sql_type(column.column_type()),
+    };
+    ScalarType::new(kind, column.is_nullable())
 }
 
 /// Maps the entity column type onto the AfterBurner SQL kind.

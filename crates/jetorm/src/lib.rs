@@ -53,7 +53,7 @@ pub use jetorm_entity::{
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
-    Database, ExecuteError, Executor, PlanCache, SelectExecute, Transaction,
+    Database, DatabaseOptions, ExecuteError, Executor, PlanCache, SelectExecute, Transaction,
 };
 pub use jetorm_query::{
     ColumnExt, EntityQuery, Expr, LoweringError, OrderKey, Select, TextColumnExt,

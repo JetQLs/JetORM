@@ -109,7 +109,7 @@ where
         )?;
         let mut relation = editor.result(scan, 0)?;
 
-        if let Some(predicate) = &select.filter {
+        if let Some(predicate) = select.filter.as_deref() {
             let filter = editor.append_operation(
                 root,
                 OperationSpec::new(LogicalOp::Filter)

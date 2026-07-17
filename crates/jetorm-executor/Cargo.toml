@@ -21,6 +21,7 @@ chrono.workspace = true
 jetorm-dialect.workspace = true
 jetorm-entity.workspace = true
 jetorm-query.workspace = true
+moka.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 uuid.workspace = true

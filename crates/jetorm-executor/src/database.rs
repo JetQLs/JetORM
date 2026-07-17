@@ -47,24 +47,79 @@ pub struct Database {
     plans: Arc<PlanCache>,
 }
 
+/// Tuning knobs for a [`Database`].
+///
+/// Every default JetORM picks is overridable here, so operators can tune the
+/// runtime without forking constants. Connection-level options — pool sizing,
+/// timeouts, search path — join this type as they are implemented; driver
+/// details beyond it remain reachable through [`Database::from_pool`].
+#[derive(Clone, Debug)]
+#[must_use = "options do nothing until passed to a Database constructor"]
+pub struct DatabaseOptions {
+    plan_cache_capacity: u64,
+}
+
+impl DatabaseOptions {
+    /// Number of cached statements retained by default.
+    ///
+    /// Statements are a few hundred bytes each, so the default costs
+    /// megabytes at most while bounding dynamically generated query shapes.
+    pub const DEFAULT_PLAN_CACHE_CAPACITY: u64 = 10_000;
+
+    /// Creates the default configuration.
+    pub fn new() -> Self {
+        Self {
+            plan_cache_capacity: Self::DEFAULT_PLAN_CACHE_CAPACITY,
+        }
+    }
+
+    /// Sets how many rendered statements the plan cache retains before
+    /// evicting the least recently used.
+    pub const fn plan_cache_capacity(mut self, capacity: u64) -> Self {
+        self.plan_cache_capacity = capacity;
+        self
+    }
+}
+
+impl Default for DatabaseOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Database {
-    /// Connects a pool to the given PostgreSQL URL.
+    /// Connects a pool to the given PostgreSQL URL with default options.
     ///
     /// # Errors
     ///
     /// Returns an error when the URL is invalid or the server is unreachable.
     pub async fn connect(url: &str) -> Result<Self, ExecuteError> {
-        Ok(Self::from_pool(PgPool::connect(url).await?))
+        Self::connect_with(url, DatabaseOptions::new()).await
     }
 
-    /// Wraps an externally configured pool.
+    /// Connects a pool to the given PostgreSQL URL with explicit options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is invalid or the server is unreachable.
+    pub async fn connect_with(url: &str, options: DatabaseOptions) -> Result<Self, ExecuteError> {
+        Ok(Self::from_pool_with(PgPool::connect(url).await?, options))
+    }
+
+    /// Wraps an externally configured pool with default options.
     ///
     /// Use this when pool sizing, timeouts, or TLS need driver-level control.
     #[must_use]
     pub fn from_pool(pool: PgPool) -> Self {
+        Self::from_pool_with(pool, DatabaseOptions::new())
+    }
+
+    /// Wraps an externally configured pool with explicit options.
+    #[must_use]
+    pub fn from_pool_with(pool: PgPool, options: DatabaseOptions) -> Self {
         Self {
             pool,
-            plans: Arc::new(PlanCache::new()),
+            plans: Arc::new(PlanCache::with_capacity(options.plan_cache_capacity)),
         }
     }
 

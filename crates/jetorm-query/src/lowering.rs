@@ -372,14 +372,76 @@ where
         )?;
         let joined = editor.result(join_op, 0)?;
 
+        // Source and related predicates lower into one WHERE over the
+        // joined row: source columns from position zero, target columns at
+        // the source's width and widened to nullable, as the null-extended
+        // side really is.
+        let mut filtered = joined;
+        if join.select.filter.is_some() || join.related_filter.is_some() {
+            let filter = editor.append_operation(
+                root,
+                OperationSpec::new(LogicalOp::Filter)
+                    .with_operands(vec![filtered])
+                    .with_result(joined_type.clone()),
+            )?;
+            let region = editor.add_region(filter)?;
+            let block = editor.append_block(region, joined_types.clone())?;
+            let mut condition: Option<(ValueId, ScalarType)> = None;
+            if let Some(predicate) = join.select.filter.as_deref() {
+                condition = Some(lower_node(
+                    &mut editor,
+                    block,
+                    predicate,
+                    &PredicateColumns {
+                        columns: R::Source::COLUMNS,
+                        offset: 0,
+                        widen_nullable: false,
+                    },
+                )?);
+            }
+            if let Some(predicate) = join.related_filter.as_deref() {
+                let related = lower_node(
+                    &mut editor,
+                    block,
+                    predicate,
+                    &PredicateColumns {
+                        columns: R::Target::COLUMNS,
+                        offset: R::Source::COLUMNS.len(),
+                        widen_nullable: true,
+                    },
+                )?;
+                condition = Some(match condition {
+                    None => related,
+                    Some(source) => {
+                        let (left_value, right_value, unified) =
+                            unify_nullability(&mut editor, block, source, related)?;
+                        let both = editor.append_operation(
+                            block,
+                            OperationSpec::new(ScalarOp::Binary(BinaryOperator::And))
+                                .with_operands(vec![left_value, right_value])
+                                .with_result(Type::Scalar(unified.clone())),
+                        )?;
+                        (editor.result(both, 0)?, unified)
+                    }
+                });
+            }
+            let (predicate_value, _) =
+                condition.expect("at least one predicate exists inside this branch");
+            editor.append_operation(
+                block,
+                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
+            )?;
+            filtered = editor.result(filter, 0)?;
+        }
+
         let rows = lower_row_stages::<R::Source>(
             &mut editor,
             root,
-            joined,
+            filtered,
             joined_type,
             joined_types,
             &RowPipeline {
-                filter: join.select.filter.as_deref(),
+                filter: None,
                 distinct: false,
                 order: &join.select.order,
                 has_offset: join.select.offset.is_some(),
@@ -605,7 +667,16 @@ where
         )?;
         let region = editor.add_region(filter)?;
         let block = editor.append_block(region, field_types.clone())?;
-        let (predicate_value, _) = lower_node(editor, block, predicate, E::COLUMNS)?;
+        let (predicate_value, _) = lower_node(
+            editor,
+            block,
+            predicate,
+            &PredicateColumns {
+                columns: E::COLUMNS,
+                offset: 0,
+                widen_nullable: false,
+            },
+        )?;
         editor.append_operation(
             block,
             OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
@@ -692,18 +763,33 @@ where
 
 /// Lowers one predicate node inside a row-lambda block.
 ///
+/// Where one predicate's columns live inside the block being lowered.
+///
+/// A plain select's predicate addresses the row from position zero; a
+/// join's related predicate addresses the target entity's columns at an
+/// offset, widened to nullable because the left join null-extends them.
+struct PredicateColumns {
+    columns: &'static [ColumnMeta],
+    offset: usize,
+    widen_nullable: bool,
+}
+
 /// The predicate carries the static typing of every operand, so lowering
 /// never consults the bind table: the query's shape alone determines its IR.
 fn lower_node(
     editor: &mut IrEditor<'_>,
     block: BlockId,
     node: &Predicate,
-    columns: &'static [ColumnMeta],
+    columns: &PredicateColumns,
 ) -> Result<(ValueId, ScalarType), LoweringError> {
     match node {
         Predicate::Column(index) => {
-            let value = editor.block_argument(block, *index)?;
-            Ok((value, column_scalar_type(&columns[*index])))
+            let value = editor.block_argument(block, columns.offset + *index)?;
+            let mut ty = column_scalar_type(&columns.columns[*index]);
+            if columns.widen_nullable {
+                ty = ty.with_nullability(true);
+            }
+            Ok((value, ty))
         }
         Predicate::Bind { position, ty } => {
             let kind = if ty.list {

@@ -1,9 +1,11 @@
 use std::any::TypeId;
+use std::sync::Arc;
 use std::{fmt, marker::PhantomData};
 
+use afterburner::ir::BinaryOperator;
 use jetorm_entity::{Entity, Relation, Value};
 
-use crate::expr::{Expr, OrderKey};
+use crate::expr::{Expr, OrderKey, Predicate, normalize};
 use crate::select::{QueryShape, Select};
 
 /// A select over one entity joined with a related entity's rows.
@@ -17,14 +19,19 @@ use crate::select::{QueryShape, Select};
 /// SQL: a source row appears once per matched row, and once with `None` when
 /// nothing matches.
 ///
-/// Filters and ordering keys keep addressing the source entity's columns;
-/// predicates over the joined entity's columns are not expressible yet.
+/// Filters and ordering keys address the source entity's columns through
+/// [`JoinSelect::filter`] and [`JoinSelect::order_by`], and the joined
+/// entity's columns through [`JoinSelect::filter_related`] and
+/// [`JoinSelect::order_by_related`].
 #[derive(Clone)]
 pub struct JoinSelect<R>
 where
     R: Relation,
 {
     pub(crate) select: Select<R::Source>,
+    /// Predicate over the joined entity's columns, lowered against the
+    /// null-extended right side of the join.
+    pub(crate) related_filter: Option<Arc<Predicate>>,
     relation: PhantomData<fn() -> R>,
 }
 
@@ -45,6 +52,7 @@ where
     {
         JoinSelect {
             select: self,
+            related_filter: None,
             relation: PhantomData,
         }
     }
@@ -69,6 +77,43 @@ where
     #[must_use]
     pub fn order_by(mut self, key: OrderKey<R::Source>) -> Self {
         self.select = self.select.order_by(key);
+        self
+    }
+
+    /// Restricts rows to those satisfying a predicate over the joined
+    /// entity's columns.
+    ///
+    /// The predicate evaluates after null extension, so an unmatched row's
+    /// joined columns are `NULL`: `filter_related(user::Name.eq("alice"))`
+    /// keeps only rows whose join matched alice, and drops unmatched rows —
+    /// exactly as SQL's `WHERE` over a `LEFT JOIN` does. Values bind into
+    /// the same positional table as source-side predicates, in call order.
+    #[must_use]
+    pub fn filter_related(mut self, predicate: Expr<R::Target, bool>) -> Self {
+        let normalized = normalize(predicate.node, &mut self.select.binds);
+        self.related_filter = Some(Arc::new(match self.related_filter.take() {
+            Some(existing) => Predicate::Binary {
+                left: Box::new(
+                    Arc::try_unwrap(existing).unwrap_or_else(|shared| (*shared).clone()),
+                ),
+                op: BinaryOperator::And,
+                right: Box::new(normalized),
+            },
+            None => normalized,
+        }));
+        self
+    }
+
+    /// Appends one ordering key over the joined entity's columns.
+    ///
+    /// Related keys and source keys share one precedence list, in call
+    /// order. Unmatched rows sort by `NULL` on related keys.
+    #[must_use]
+    pub fn order_by_related(mut self, key: OrderKey<R::Target>) -> Self {
+        let mut spec = key.spec;
+        // The joined row places the target's columns after the source's.
+        spec.column += R::Source::COLUMNS.len();
+        self.select.order.push(spec);
         self
     }
 
@@ -110,7 +155,7 @@ where
     /// statement.
     #[must_use]
     pub fn shape(&self) -> QueryShape {
-        QueryShape::for_join(&self.select, TypeId::of::<R>())
+        QueryShape::for_join(&self.select, TypeId::of::<R>(), self.related_filter.clone())
     }
 }
 

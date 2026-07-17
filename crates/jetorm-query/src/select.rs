@@ -41,6 +41,9 @@ pub struct QueryShape {
     has_fetch: bool,
     distinct: bool,
     projection: Option<Vec<usize>>,
+    /// Whether the query collapses to a single `count(*)` row. A count and a
+    /// select over the same builder must never share a cached statement.
+    count: bool,
 }
 
 impl PartialEq for QueryShape {
@@ -56,6 +59,7 @@ impl PartialEq for QueryShape {
             && self.has_fetch == other.has_fetch
             && self.distinct == other.distinct
             && self.projection == other.projection
+            && self.count == other.count
             && match (&self.filter, &other.filter) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
@@ -70,6 +74,13 @@ impl Hash for QueryShape {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.hash);
     }
+}
+
+/// Process-wide hash seed shared by every shape, which is exactly a plan
+/// cache's scope.
+fn shape_seed() -> &'static RandomState {
+    static SEED: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+    &SEED
 }
 
 /// Typed `SELECT` builder over one entity.
@@ -221,13 +232,11 @@ where
         let has_fetch = self.fetch.is_some();
 
         // One walk at construction; every later probe reuses the digest.
-        // The seed is process-wide, which is exactly a plan cache's scope.
-        static SEED: LazyLock<RandomState> = LazyLock::new(RandomState::new);
-        let mut hasher = SEED.build_hasher();
+        let mut hasher = shape_seed().build_hasher();
         entity.hash(&mut hasher);
         self.filter.hash(&mut hasher);
         self.order.hash(&mut hasher);
-        (has_offset, has_fetch, self.distinct).hash(&mut hasher);
+        (has_offset, has_fetch, self.distinct, false).hash(&mut hasher);
         self.projection.hash(&mut hasher);
 
         QueryShape {
@@ -239,7 +248,118 @@ where
             has_fetch,
             distinct: self.distinct,
             projection: self.projection.clone(),
+            count: false,
         }
+    }
+
+    /// Converts the query into a row count over the same rows.
+    ///
+    /// The count sees exactly the rows this select would return: the filter,
+    /// `DISTINCT`, and any row limit or offset carry over. Ordering does not —
+    /// no ordering can change how many rows there are — so counts differing
+    /// only in `order_by` share one statement.
+    #[must_use]
+    pub fn into_count(self) -> CountQuery<E> {
+        CountQuery {
+            filter: self.filter,
+            binds: self.binds,
+            offset: self.offset,
+            fetch: self.fetch,
+            distinct: self.distinct,
+            entity: PhantomData,
+        }
+    }
+}
+
+/// Typed `SELECT count(*)` over the rows a [`Select`] would return.
+///
+/// Built through [`Select::into_count`]; executors expose it as a `count`
+/// method on the select itself. The query keeps the source's bind table, so
+/// a filtered count binds its values exactly like the filtered select.
+#[derive(Clone)]
+pub struct CountQuery<E>
+where
+    E: Entity,
+{
+    pub(crate) filter: Option<Arc<Predicate>>,
+    pub(crate) binds: Vec<Value>,
+    pub(crate) offset: Option<u64>,
+    pub(crate) fetch: Option<u64>,
+    pub(crate) distinct: bool,
+    entity: PhantomData<fn() -> E>,
+}
+
+impl<E> CountQuery<E>
+where
+    E: Entity,
+{
+    /// Returns captured values in positional bind order.
+    ///
+    /// Positions match [`Select::binds`] for the source query: predicate
+    /// values in capture order, then the offset, then the row limit.
+    #[must_use]
+    pub fn binds(&self) -> Vec<Value> {
+        let mut binds = self.binds.clone();
+        Select::<E>::push_count_binds(&mut binds, self.offset, self.fetch);
+        binds
+    }
+
+    /// Consumes the query and returns its captured values in bind order.
+    #[must_use]
+    pub fn into_binds(self) -> Vec<Value> {
+        let mut binds = self.binds;
+        Select::<E>::push_count_binds(&mut binds, self.offset, self.fetch);
+        binds
+    }
+
+    /// Returns this query's value-independent shape.
+    ///
+    /// A count never shares a shape with a select — the two lower to
+    /// different IR — so the shape carries the aggregate as a structural
+    /// fact alongside the source query's own identity.
+    #[must_use]
+    pub fn shape(&self) -> QueryShape {
+        let entity = TypeId::of::<E>();
+        let has_offset = self.offset.is_some();
+        let has_fetch = self.fetch.is_some();
+
+        let mut hasher = shape_seed().build_hasher();
+        entity.hash(&mut hasher);
+        self.filter.hash(&mut hasher);
+        // A count carries no ordering; hash the same field count as a
+        // select so the streams stay aligned.
+        Vec::<SortKeySpec>::new().hash(&mut hasher);
+        (has_offset, has_fetch, self.distinct, true).hash(&mut hasher);
+        None::<Vec<usize>>.hash(&mut hasher);
+
+        QueryShape {
+            hash: hasher.finish(),
+            entity,
+            filter: self.filter.clone(),
+            order: Vec::new(),
+            has_offset,
+            has_fetch,
+            distinct: self.distinct,
+            projection: None,
+            count: true,
+        }
+    }
+}
+
+impl<E> fmt::Debug for CountQuery<E>
+where
+    E: Entity,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CountQuery")
+            .field("table", &E::TABLE.name())
+            .field("filter", &self.filter)
+            .field("binds", &self.binds)
+            .field("offset", &self.offset)
+            .field("fetch", &self.fetch)
+            .field("distinct", &self.distinct)
+            .finish()
     }
 }
 
@@ -268,6 +388,38 @@ where
             .field("distinct", &self.distinct)
             .field("projection", &self.projection)
             .finish()
+    }
+}
+
+/// Queries a plan cache can key and lower.
+///
+/// The contract pairs the two halves a statement cache needs: a
+/// value-independent [`QueryShape`] as the key, and IR lowering (through
+/// [`afterburner::IntoAfterBurnerIr`] on the clone) to produce the statement
+/// on a miss. Both selects and counts satisfy it, so one cache serves every
+/// query kind.
+pub trait CacheableQuery:
+    Clone + afterburner::IntoAfterBurnerIr<Error = crate::LoweringError>
+{
+    /// Returns the value-independent shape identifying this query.
+    fn shape(&self) -> QueryShape;
+}
+
+impl<E> CacheableQuery for Select<E>
+where
+    E: Entity,
+{
+    fn shape(&self) -> QueryShape {
+        Self::shape(self)
+    }
+}
+
+impl<E> CacheableQuery for CountQuery<E>
+where
+    E: Entity,
+{
+    fn shape(&self) -> QueryShape {
+        Self::shape(self)
     }
 }
 

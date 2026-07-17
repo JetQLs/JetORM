@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use afterburner::IntoAfterBurnerIr;
 use jetorm_dialect::{Dialect, Postgres, Statement};
-use jetorm_entity::Entity;
-use jetorm_query::{QueryShape, Select};
+use jetorm_query::{CacheableQuery, QueryShape};
 
 use crate::error::ExecuteError;
 
@@ -64,9 +62,9 @@ impl PlanCache {
     ///
     /// Returns an error when the query cannot be lowered, fails IR
     /// verification, or cannot be rendered as SQL.
-    pub fn statement<E>(&self, query: &Select<E>) -> Result<Arc<Statement>, ExecuteError>
+    pub fn statement<Q>(&self, query: &Q) -> Result<Arc<Statement>, ExecuteError>
     where
-        E: Entity,
+        Q: CacheableQuery,
     {
         let shape = query.shape();
         if let Some(statement) = self.statements.get(&shape) {
@@ -82,9 +80,9 @@ impl PlanCache {
     }
 
     /// Lowers, verifies, and renders one query without consulting the cache.
-    fn render<E>(query: &Select<E>) -> Result<Statement, ExecuteError>
+    fn render<Q>(query: &Q) -> Result<Statement, ExecuteError>
     where
-        E: Entity,
+        Q: CacheableQuery,
     {
         // Cloning the builder keeps `statement` a read-only view of the
         // caller's query; the clone is a small AST plus its bind table, and

@@ -73,4 +73,4 @@ mod select;
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use lowering::LoweringError;
 pub use projection::{ColumnList, Projected};
-pub use select::{EntityQuery, QueryShape, Select};
+pub use select::{CacheableQuery, CountQuery, EntityQuery, QueryShape, Select};

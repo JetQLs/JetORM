@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use jetorm_entity::{ColumnMeta, ColumnType, Entity, Model};
+use jetorm_entity::{ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue};
 use jetorm_query::{ColumnList, Projected, Select};
 
 use crate::database::Executor;
@@ -35,6 +35,16 @@ where
     ) -> impl Future<Output = Result<Option<E::Model>, ExecuteError>> + Send
     where
         X: Executor;
+
+    /// Counts the rows this query would return, without fetching them.
+    ///
+    /// Executes as a single `count(*)` over the same filter, `DISTINCT`,
+    /// and row limit; ordering is dropped, since it cannot change the
+    /// count, so counts differing only in `order_by` share one cached
+    /// statement.
+    fn count<X>(self, executor: X) -> impl Future<Output = Result<u64, ExecuteError>> + Send
+    where
+        X: Executor;
 }
 
 impl<E> SelectExecute<E> for Select<E>
@@ -66,6 +76,46 @@ where
     {
         let mut models = self.limit(1).all(executor).await?;
         Ok(models.pop())
+    }
+
+    async fn count<X>(self, executor: X) -> Result<u64, ExecuteError>
+    where
+        X: Executor,
+    {
+        let query = self.into_count();
+        let statement = executor.plan_cache().statement(&query)?;
+        let rows = executor
+            .fetch_rows(statement, query.into_binds(), vec![ColumnType::Int64])
+            .await?;
+
+        // A grand-total aggregate returns exactly one row with one value; a
+        // driver delivering anything else is reported, not unwrapped.
+        let Some(row) = rows.into_iter().next() else {
+            return Err(ExecuteError::Decode {
+                row: 0,
+                source: DecodeError::ColumnCount {
+                    expected: 1,
+                    actual: 0,
+                },
+            });
+        };
+        let mut values = row.into_values();
+        let value = values.pop().ok_or(ExecuteError::Decode {
+            row: 0,
+            source: DecodeError::ColumnCount {
+                expected: 1,
+                actual: 0,
+            },
+        })?;
+        let count = i64::from_value(value).map_err(|mismatch| ExecuteError::Decode {
+            row: 0,
+            source: DecodeError::Column {
+                name: "count",
+                mismatch,
+            },
+        })?;
+        // SQL's count is never negative; the fallback is unreachable.
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 }
 

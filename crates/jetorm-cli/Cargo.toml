@@ -25,6 +25,7 @@ jetorm-migration.workspace = true
 jetorm-schema.workspace = true
 tokio.workspace = true
 toml.workspace = true
+unicode-ident.workspace = true
 
 [dev-dependencies]
 jetorm-entity.workspace = true

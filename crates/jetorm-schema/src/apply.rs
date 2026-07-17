@@ -271,6 +271,8 @@ impl SchemaSet {
                 column,
                 from,
                 to,
+                from_type_name,
+                to_type_name,
             } => {
                 let definition = self.require_column_mut(table, column)?;
                 if definition.column_type() != *from {
@@ -282,7 +284,18 @@ impl SchemaSet {
                         ),
                     });
                 }
+                if definition.type_name() != from_type_name.as_deref() {
+                    return Err(ApplyError::StateMismatch {
+                        table: table.clone(),
+                        detail: format!(
+                            "column {column} has type name {:?}, change expected \
+                             {from_type_name:?}",
+                            definition.type_name()
+                        ),
+                    });
+                }
                 definition.set_column_type(*to);
+                definition.set_type_name(to_type_name.clone());
                 Ok(())
             }
             SchemaChange::SetNullable {

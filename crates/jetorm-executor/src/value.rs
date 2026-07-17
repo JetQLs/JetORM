@@ -196,29 +196,54 @@ fn decode_array(
 ) -> Result<Value, ExecuteError> {
     use jetorm_entity::{ElementType, SqlValue};
 
-    fn wrap<T: SqlValue>(decoded: Option<Vec<T>>, element: ElementType) -> Value {
+    // Elements decode as options: PostgreSQL permits NULL elements in any
+    // array column, JetORM's own DDL included, even though `Vec<T>` cannot
+    // hold one. An external writer's NULL element must fail as a clear
+    // named condition, not a raw driver error.
+    fn wrap<T: SqlValue>(
+        decoded: Option<Vec<Option<T>>>,
+        element: ElementType,
+        index: usize,
+    ) -> Result<Value, ExecuteError> {
         match decoded {
-            Some(values) => Value::Array {
-                element: element.as_column_type(),
-                values: values.into_iter().map(SqlValue::into_value).collect(),
-            },
-            None => Value::Null(jetorm_entity::ColumnType::ArrayOf(element)),
+            Some(values) => {
+                let values = values
+                    .into_iter()
+                    .map(|value| {
+                        value
+                            .map(SqlValue::into_value)
+                            .ok_or_else(|| ExecuteError::ArrayDecode {
+                                column: index,
+                                detail: format!(
+                                    "stored array contains a NULL element; the \
+                                     entity's field holds non-null {element:?} \
+                                     elements"
+                                ),
+                            })
+                    })
+                    .collect::<Result<_, _>>()?;
+                Ok(Value::Array {
+                    element: element.as_column_type(),
+                    values,
+                })
+            }
+            None => Ok(Value::Null(jetorm_entity::ColumnType::ArrayOf(element))),
         }
     }
 
-    Ok(match element {
-        ElementType::Boolean => wrap::<bool>(row.try_get(index)?, element),
-        ElementType::Int16 => wrap::<i16>(row.try_get(index)?, element),
-        ElementType::Int32 => wrap::<i32>(row.try_get(index)?, element),
-        ElementType::Int64 => wrap::<i64>(row.try_get(index)?, element),
-        ElementType::Float32 => wrap::<f32>(row.try_get(index)?, element),
-        ElementType::Float64 => wrap::<f64>(row.try_get(index)?, element),
-        ElementType::Decimal => wrap::<rust_decimal::Decimal>(row.try_get(index)?, element),
-        ElementType::Text => wrap::<String>(row.try_get(index)?, element),
-        ElementType::Date => wrap::<NaiveDate>(row.try_get(index)?, element),
-        ElementType::Time => wrap::<NaiveTime>(row.try_get(index)?, element),
-        ElementType::Timestamp => wrap::<NaiveDateTime>(row.try_get(index)?, element),
-        ElementType::TimestampUtc => wrap::<DateTime<Utc>>(row.try_get(index)?, element),
-        ElementType::Uuid => wrap::<Uuid>(row.try_get(index)?, element),
-    })
+    match element {
+        ElementType::Boolean => wrap::<bool>(row.try_get(index)?, element, index),
+        ElementType::Int16 => wrap::<i16>(row.try_get(index)?, element, index),
+        ElementType::Int32 => wrap::<i32>(row.try_get(index)?, element, index),
+        ElementType::Int64 => wrap::<i64>(row.try_get(index)?, element, index),
+        ElementType::Float32 => wrap::<f32>(row.try_get(index)?, element, index),
+        ElementType::Float64 => wrap::<f64>(row.try_get(index)?, element, index),
+        ElementType::Decimal => wrap::<rust_decimal::Decimal>(row.try_get(index)?, element, index),
+        ElementType::Text => wrap::<String>(row.try_get(index)?, element, index),
+        ElementType::Date => wrap::<NaiveDate>(row.try_get(index)?, element, index),
+        ElementType::Time => wrap::<NaiveTime>(row.try_get(index)?, element, index),
+        ElementType::Timestamp => wrap::<NaiveDateTime>(row.try_get(index)?, element, index),
+        ElementType::TimestampUtc => wrap::<DateTime<Utc>>(row.try_get(index)?, element, index),
+        ElementType::Uuid => wrap::<Uuid>(row.try_get(index)?, element, index),
+    }
 }

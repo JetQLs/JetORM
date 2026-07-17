@@ -169,6 +169,8 @@ fn type_and_primary_key_changes_round_trip() {
         column: "email".to_owned(),
         from: ColumnType::Text,
         to: ColumnType::Json,
+        from_type_name: None,
+        to_type_name: None,
     }));
     assert!(changes.changes().iter().any(|change| matches!(
         change,
@@ -191,6 +193,8 @@ fn destructive_classification_matches_data_safety() {
             column: "c".to_owned(),
             from: ColumnType::Int32,
             to: ColumnType::Int16,
+            from_type_name: None,
+            to_type_name: None,
         },
         SchemaChange::SetNullable {
             table: table.clone(),
@@ -350,6 +354,8 @@ fn apply_rejects_replay_drift() {
             // Recorded prior type disagrees with the actual state.
             from: ColumnType::Uuid,
             to: ColumnType::Json,
+            from_type_name: None,
+            to_type_name: None,
         })
         .expect_err("drifted prior state must be rejected");
     assert!(matches!(
@@ -723,4 +729,52 @@ fn dropping_a_column_takes_the_tables_own_self_reference_along() {
         0,
         "the self-reference went with its referenced column"
     );
+}
+
+#[test]
+fn a_columns_named_type_is_part_of_its_identity() {
+    // Same carrier type, different named type: text vs enum-typed text.
+    let mut plain = SchemaSet::new();
+    plain.insert(
+        TableDef::new(TableName::new("posts"))
+            .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+            .with_column(ColumnDef::new("status", ColumnType::Text))
+            .with_primary_key(vec!["id".to_owned()]),
+    );
+    let mut typed = SchemaSet::new();
+    typed.insert_enum("post_status", ["draft", "live"].map(str::to_owned));
+    typed.insert(
+        TableDef::new(TableName::new("posts"))
+            .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+            .with_column(ColumnDef::new("status", ColumnType::Text).with_type_name("post_status"))
+            .with_primary_key(vec!["id".to_owned()]),
+    );
+
+    let changes = diff(&plain, &typed);
+    assert!(
+        changes.changes().contains(&SchemaChange::AlterColumnType {
+            table: TableName::new("posts"),
+            column: "status".to_owned(),
+            from: ColumnType::Text,
+            to: ColumnType::Text,
+            from_type_name: None,
+            to_type_name: Some("post_status".to_owned()),
+        }),
+        "gaining a named type is a visible alteration: {:?}",
+        changes.changes()
+    );
+    let mut replayed = plain.clone();
+    replayed
+        .apply_all(changes.changes())
+        .expect("the enum-ness change applies");
+    assert_eq!(replayed, typed);
+
+    // And the reverse direction converges too, dropping the now-unused
+    // type after the column stops using it.
+    let teardown = diff(&typed, &plain);
+    let mut replayed = typed.clone();
+    replayed
+        .apply_all(teardown.changes())
+        .expect("losing the named type applies");
+    assert_eq!(replayed, plain);
 }

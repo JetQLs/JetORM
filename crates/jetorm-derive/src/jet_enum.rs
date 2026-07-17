@@ -140,6 +140,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         #[automatically_derived]
+        impl #cr::ScalarValue for #enum_ident {}
+
+        #[automatically_derived]
         impl #cr::SqlValue for #enum_ident {
             const COLUMN_TYPE: #cr::ColumnType = #cr::ColumnType::Text;
             #native_consts

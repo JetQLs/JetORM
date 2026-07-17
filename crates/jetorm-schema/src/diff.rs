@@ -58,6 +58,13 @@ pub enum SchemaChange {
         from: ColumnType,
         /// Type required by the target state.
         to: ColumnType,
+        /// Named database type in the current state — a native enum's
+        /// name — when the column has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_type_name: Option<String>,
+        /// Named database type required by the target state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_type_name: Option<String>,
     },
     /// Changes whether one column accepts SQL `NULL`.
     SetNullable {
@@ -213,10 +220,20 @@ impl fmt::Display for SchemaChange {
                 column,
                 from,
                 to,
-            } => write!(
-                formatter,
-                "alter column {table}.{column} type {from:?} -> {to:?}"
-            ),
+                from_type_name,
+                to_type_name,
+            } => {
+                let spell = |column_type: &ColumnType, name: &Option<String>| match name {
+                    Some(name) => name.clone(),
+                    None => format!("{column_type:?}"),
+                };
+                write!(
+                    formatter,
+                    "alter column {table}.{column} type {} -> {}",
+                    spell(from, from_type_name),
+                    spell(to, to_type_name)
+                )
+            }
             Self::SetNullable {
                 table,
                 column,
@@ -635,12 +652,18 @@ fn diff_table(
         let Some(desired) = target.column(column.name()) else {
             continue;
         };
-        if column.column_type() != desired.column_type() {
+        // The named type is part of a column's identity: text vs enum, or
+        // one enum vs another, differ even when the carrier type matches.
+        if column.column_type() != desired.column_type()
+            || column.type_name() != desired.type_name()
+        {
             changes.push(SchemaChange::AlterColumnType {
                 table: table.clone(),
                 column: column.name().to_owned(),
                 from: column.column_type(),
                 to: desired.column_type(),
+                from_type_name: column.type_name().map(str::to_owned),
+                to_type_name: desired.type_name().map(str::to_owned),
             });
         }
         if column.is_nullable() != desired.is_nullable() {

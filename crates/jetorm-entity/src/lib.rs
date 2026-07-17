@@ -35,4 +35,4 @@ pub use error::{DecodeError, ValueTypeMismatch};
 pub use json::Json;
 pub use meta::{ColumnMeta, ColumnType, ElementType, TableMeta};
 pub use relation::{EnumMeta, ForeignKeyMeta, ForeignKeyRef, Inverse, ReferentialAction, Relation};
-pub use value::{SqlValue, Value};
+pub use value::{ScalarValue, SqlValue, Value};

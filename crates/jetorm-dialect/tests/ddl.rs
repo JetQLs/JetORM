@@ -60,6 +60,8 @@ fn column_changes_render_single_statements() {
                 column: "email".to_owned(),
                 from: ColumnType::Text,
                 to: ColumnType::Json,
+                from_type_name: None,
+                to_type_name: None,
             },
             "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"email\" TYPE jsonb \
              USING \"email\"::jsonb",
@@ -274,5 +276,38 @@ fn hand_built_create_table_renders_inline_foreign_keys() {
              PRIMARY KEY (\"id\"), \
              CONSTRAINT \"posts_author_id_fkey\" FOREIGN KEY (\"author_id\") \
              REFERENCES \"users\" (\"id\") ON DELETE SET NULL)"]
+    );
+}
+
+#[test]
+fn named_type_alterations_route_the_cast_through_text() {
+    let statements = render_change(&SchemaChange::AlterColumnType {
+        table: TableName::new("posts"),
+        column: "status".to_owned(),
+        from: ColumnType::Text,
+        to: ColumnType::Text,
+        from_type_name: None,
+        to_type_name: Some("post_status".to_owned()),
+    })
+    .expect("the alteration renders");
+    assert_eq!(
+        statements,
+        [
+            "ALTER TABLE \"posts\" ALTER COLUMN \"status\" TYPE \"post_status\" \
+          USING \"status\"::text::\"post_status\""
+        ]
+    );
+}
+
+#[test]
+fn qualified_enum_names_render_with_their_schema() {
+    let statements = render_change(&SchemaChange::CreateEnum {
+        name: "app.post_status".to_owned(),
+        variants: vec!["draft".to_owned()],
+    })
+    .expect("the qualified type renders");
+    assert_eq!(
+        statements,
+        ["CREATE TYPE \"app\".\"post_status\" AS ENUM ('draft')"]
     );
 }

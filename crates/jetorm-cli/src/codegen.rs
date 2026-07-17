@@ -25,6 +25,41 @@ const RAW_ONLY_KEYWORDS: &[&str] = &[
 /// Names no identifier — raw or otherwise — may take.
 const RESERVED_NAMES: &[&str] = &["self", "Self", "super", "crate"];
 
+/// Prelude names the generated module itself uses in field types. A
+/// generated type taking one of these would shadow it for every other
+/// field in the module — `pub enum String` silently retypes every text
+/// column — so they are claimed from the start.
+const PRELUDE_NAMES: &[&str] = &[
+    "String", "Vec", "Option", "Box", "Result", "Some", "None", "Ok", "Err", "Json",
+];
+
+/// Renders text as the body of a Rust string literal.
+///
+/// Database names and enum labels legally contain quotes, backslashes,
+/// and control characters; interpolated verbatim they break out of the
+/// literal — at best a compile error in the generated file, at worst
+/// injected code. `escape_default` round-trips exactly: the escaped
+/// literal decodes back to the original text.
+fn string_literal(text: &str) -> String {
+    text.chars().flat_map(char::escape_default).collect()
+}
+
+/// Renders text safe for a single-line doc comment.
+///
+/// A newline in a name would end the comment and leave the rest of the
+/// name as bare tokens in the module.
+fn doc_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Generated entity source plus everything worth telling the operator.
 pub struct GeneratedEntities {
     /// The Rust source of the module.
@@ -43,9 +78,32 @@ pub fn entities_source(schema: &SchemaSet) -> GeneratedEntities {
     );
     let mut warnings = Vec::new();
     let enum_types = write_enums(&mut source, schema, &mut warnings);
+    // Two tables whose names case identically — `user_role` and a quoted
+    // `"user-role"` — must not define the same struct twice; enum names
+    // are claimed too, since write_enums already resolved against tables.
+    let mut claimed: BTreeSet<String> = enum_types.values().cloned().collect();
     for table in schema.tables() {
+        let mut struct_name = pascal_case(table.name().name());
+        if !claimed.insert(struct_name.clone()) {
+            let base = struct_name.clone();
+            while !claimed.insert(struct_name.clone()) {
+                struct_name.push_str("Table");
+            }
+            warnings.push(format!(
+                "table `{}`: struct name {base:?} is already taken; \
+                 generated as {struct_name:?}",
+                table.name()
+            ));
+        }
         source.push('\n');
-        write_table(&mut source, schema, table, &enum_types, &mut warnings);
+        write_table(
+            &mut source,
+            schema,
+            table,
+            &struct_name,
+            &enum_types,
+            &mut warnings,
+        );
     }
     GeneratedEntities { source, warnings }
 }
@@ -54,30 +112,37 @@ pub fn entities_source(schema: &SchemaSet) -> GeneratedEntities {
 /// from database type name to generated Rust type name.
 ///
 /// An enum whose labels cannot become distinct Rust identifiers is skipped
-/// with a warning; its columns fall back to `String`, which reads and
-/// writes the same stored text without the typed surface.
+/// with a warning, and so are its columns: a plain `String` field on an
+/// enum-typed column would neither bind nor decode.
 fn write_enums(
     source: &mut String,
     schema: &SchemaSet,
     warnings: &mut Vec<String>,
 ) -> std::collections::BTreeMap<String, String> {
-    // Struct names are claimed by tables; an enum type named like a table
-    // (or another enum after casing) must take a distinct spelling.
+    // Struct names are claimed by tables, and the prelude names the module
+    // itself relies on are claimed from the start; an enum type cased like
+    // any of them must take a distinct spelling.
     let mut claimed: BTreeSet<String> = schema
         .tables()
         .map(|table| pascal_case(table.name().name()))
+        .chain(PRELUDE_NAMES.iter().map(ToString::to_string))
         .collect();
     let mut enum_types = std::collections::BTreeMap::new();
     for (name, variants) in schema.enums() {
-        let mut rust_name = pascal_case(name);
+        // A qualified type — `app.post_status` from a non-public pull —
+        // takes its Rust name from the type itself, not the namespace.
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        let mut rust_name = pascal_case(bare);
         if !valid_identifier(&rust_name) {
             warnings.push(format!(
-                "enum type {name:?} has no Rust spelling; its columns fall \
-                 back to String"
+                "enum type {name:?} has no Rust spelling; its columns are \
+                 skipped until it gets one"
             ));
             continue;
         }
-        if claimed.contains(&rust_name) {
+        // Suffix until the name is genuinely free — the first suffixed
+        // spelling can itself be claimed by a table or an earlier enum.
+        while claimed.contains(&rust_name) {
             rust_name.push_str("Enum");
         }
         let mut idents = Vec::with_capacity(variants.len());
@@ -87,7 +152,7 @@ fn write_enums(
             if !valid_identifier(&ident) || !seen.insert(ident.clone()) {
                 warnings.push(format!(
                     "enum type {name:?}: label {label:?} has no distinct Rust \
-                     spelling; the type falls back to String columns"
+                     spelling; the type's columns are skipped until it gets one"
                 ));
                 idents.clear();
                 break;
@@ -99,18 +164,18 @@ fn write_enums(
         }
         claimed.insert(rust_name.clone());
         source.push('\n');
-        let _ = writeln!(source, "/// Values of the `{name}` enum type.");
+        let _ = writeln!(source, "/// Values of the `{}` enum type.", doc_text(name));
         let _ = writeln!(
             source,
             "#[derive(Clone, Copy, Debug, PartialEq, Eq, JetEnum)]"
         );
-        let _ = writeln!(source, "#[jet(native = \"{name}\")]");
+        let _ = writeln!(source, "#[jet(native = \"{}\")]", string_literal(name));
         let _ = writeln!(source, "pub enum {rust_name} {{");
         for (label, ident) in variants.iter().zip(&idents) {
             // The derive stores the snake_case of the variant name; a label
             // that spelling would not reproduce keeps its exact text.
             if snake_case(ident) != *label {
-                let _ = writeln!(source, "    #[jet(rename = \"{label}\")]");
+                let _ = writeln!(source, "    #[jet(rename = \"{}\")]", string_literal(label));
             }
             let _ = writeln!(source, "    {ident},");
         }
@@ -121,12 +186,16 @@ fn write_enums(
 }
 
 /// Whether the generated name is usable as a Rust identifier.
+///
+/// Rust identifiers follow Unicode XID, which is narrower than
+/// alphanumeric — superscripts and vulgar fractions count as alphanumeric
+/// but no identifier may hold them.
 fn valid_identifier(name: &str) -> bool {
     let mut characters = name.chars();
     characters
         .next()
-        .is_some_and(|first| first.is_alphabetic() || first == '_')
-        && characters.all(|character| character.is_alphanumeric() || character == '_')
+        .is_some_and(|first| unicode_ident::is_xid_start(first) || first == '_')
+        && characters.all(unicode_ident::is_xid_continue)
         && !RAW_ONLY_KEYWORDS.contains(&name)
         && !RESERVED_NAMES.contains(&name)
 }
@@ -135,22 +204,31 @@ fn write_table(
     source: &mut String,
     schema: &SchemaSet,
     table: &TableDef,
+    struct_name: &str,
     enum_types: &std::collections::BTreeMap<String, String>,
     warnings: &mut Vec<String>,
 ) {
-    let struct_name = pascal_case(table.name().name());
-    let _ = writeln!(source, "/// Row of `{}`.", table.name());
+    let _ = writeln!(
+        source,
+        "/// Row of `{}`.",
+        doc_text(&table.name().to_string())
+    );
     let _ = writeln!(source, "#[derive(Clone, Debug, PartialEq, JetModel)]");
     match table.name().schema() {
         Some(qualifier) => {
             let _ = writeln!(
                 source,
-                "#[jet(table = \"{}\", schema = \"{qualifier}\")]",
-                table.name().name()
+                "#[jet(table = \"{}\", schema = \"{}\")]",
+                string_literal(table.name().name()),
+                string_literal(qualifier)
             );
         }
         None => {
-            let _ = writeln!(source, "#[jet(table = \"{}\")]", table.name().name());
+            let _ = writeln!(
+                source,
+                "#[jet(table = \"{}\")]",
+                string_literal(table.name().name())
+            );
         }
     }
     let _ = writeln!(source, "pub struct {struct_name} {{");
@@ -184,6 +262,28 @@ fn write_column(
     enum_types: &std::collections::BTreeMap<String, String>,
     warnings: &mut Vec<String>,
 ) {
+    // A column of an enum type that got no Rust spelling cannot be
+    // represented: a plain String field would neither bind (the insert
+    // casts ::text against the enum column) nor decode (the driver
+    // reports the enum's own type). Skip it and say so — the same
+    // contract unmappable database types follow.
+    let rust_type = match column.type_name() {
+        Some(type_name) => match enum_types.get(type_name) {
+            Some(enum_type) => enum_type.clone(),
+            None => {
+                warnings.push(format!(
+                    "{}.{}: enum type {type_name:?} was not generated; the \
+                     column is omitted from the entity until its labels get \
+                     Rust spellings",
+                    table.name(),
+                    column.name()
+                ));
+                return;
+            }
+        },
+        None => field_type_of(column.column_type()),
+    };
+
     let mut attributes = Vec::new();
     let is_key_member = table.primary_key().iter().any(|key| key == column.name());
     if is_key_member {
@@ -245,7 +345,7 @@ fn write_column(
     // Rust reserves outright get a synthetic field mapped back onto the
     // column through the derive's own column attribute.
     let field_name = if RESERVED_NAMES.contains(&column.name()) {
-        attributes.push(format!("column = \"{}\"", column.name()));
+        attributes.push(format!("column = \"{}\"", string_literal(column.name())));
         format!("{}_field", column.name().to_lowercase())
     } else if RAW_ONLY_KEYWORDS.contains(&column.name()) {
         format!("r#{}", column.name())
@@ -256,25 +356,6 @@ fn write_column(
     for attribute in &attributes {
         let _ = writeln!(source, "    #[jet({attribute})]");
     }
-    let rust_type = match column.type_name() {
-        Some(type_name) => match enum_types.get(type_name) {
-            Some(enum_type) => enum_type.clone(),
-            None => {
-                // The enum had no Rust spelling; the stored text still
-                // reads and writes, but the field loses the type name and
-                // a later generate will see the difference.
-                warnings.push(format!(
-                    "{}.{}: enum type {type_name:?} was not generated; the \
-                     field is a plain String and will diff against the \
-                     database until the labels get Rust spellings",
-                    table.name(),
-                    column.name()
-                ));
-                field_type_of(column.column_type())
-            }
-        },
-        None => field_type_of(column.column_type()),
-    };
     let field_type = if column.is_nullable() {
         format!("Option<{rust_type}>")
     } else {
@@ -423,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_labels_fall_back_to_string_with_a_warning() {
+    fn unrepresentable_labels_skip_the_column_with_a_warning() {
         let mut schema = SchemaSet::new();
         // Both labels case to the same identifier — no distinct spelling.
         schema.insert_enum("clash", ["draft", "Draft"].map(str::to_owned));
@@ -439,13 +520,159 @@ mod tests {
             "no enum should generate:\n{}",
             generated.source
         );
-        assert!(generated.source.contains("pub state: String,"));
+        // A String field on an enum-typed column would neither bind nor
+        // decode; the column is omitted, not misrepresented.
+        assert!(
+            !generated.source.contains("pub state"),
+            "the untypeable column is omitted:\n{}",
+            generated.source
+        );
         assert!(
             generated
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("clash")),
-            "the fallback is reported: {:?}",
+                .any(|warning| warning.contains("clash") && warning.contains("omitted")),
+            "the omission is reported: {:?}",
+            generated.warnings
+        );
+    }
+
+    #[test]
+    fn names_and_labels_are_escaped_into_valid_rust_literals() {
+        let mut schema = SchemaSet::new();
+        // A quote and a backslash — both legal in PostgreSQL enum labels —
+        // must not break out of the generated string literal.
+        schema.insert_enum("mood", ["say \"hi\"", "back\\slash"].map(str::to_owned));
+        schema.insert(
+            TableDef::new(TableName::new("posts"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_column(ColumnDef::new("mood", ColumnType::Text).with_type_name("mood"))
+                .with_primary_key(["id".to_owned()]),
+        );
+        let generated = entities_source(&schema);
+        assert!(
+            generated
+                .source
+                .contains("#[jet(rename = \"say \\\"hi\\\"\")]"),
+            "the quote is escaped:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("#[jet(rename = \"back\\\\slash\")]"),
+            "the backslash is escaped:\n{}",
+            generated.source
+        );
+        assert!(generated.warnings.is_empty(), "{:?}", generated.warnings);
+    }
+
+    #[test]
+    fn a_newline_in_a_type_name_cannot_escape_the_doc_comment() {
+        let mut schema = SchemaSet::new();
+        schema.insert_enum("order\nstatus", ["a"].map(str::to_owned));
+        let generated = entities_source(&schema);
+        assert!(
+            generated
+                .source
+                .contains("/// Values of the `order status` enum type."),
+            "the newline is flattened inside the comment:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("#[jet(native = \"order\\nstatus\")]"),
+            "the literal keeps the exact name, escaped:\n{}",
+            generated.source
+        );
+    }
+
+    #[test]
+    fn prelude_names_are_never_shadowed() {
+        let mut schema = SchemaSet::new();
+        schema.insert_enum("string", ["a", "b"].map(str::to_owned));
+        schema.insert(
+            TableDef::new(TableName::new("users"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_column(ColumnDef::new("email", ColumnType::Text))
+                .with_column(ColumnDef::new("kind", ColumnType::Text).with_type_name("string"))
+                .with_primary_key(["id".to_owned()]),
+        );
+        let generated = entities_source(&schema);
+        assert!(
+            generated.source.contains("pub enum StringEnum {"),
+            "the enum steps aside for the prelude:\n{}",
+            generated.source
+        );
+        assert!(generated.source.contains("pub email: String,"));
+        assert!(generated.source.contains("pub kind: StringEnum,"));
+    }
+
+    #[test]
+    fn the_collision_suffix_loops_until_the_name_is_free() {
+        let mut schema = SchemaSet::new();
+        schema.insert_enum("status_", ["a"].map(str::to_owned));
+        schema.insert(
+            TableDef::new(TableName::new("status"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_primary_key(["id".to_owned()]),
+        );
+        schema.insert(
+            TableDef::new(TableName::new("status_enum"))
+                .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                .with_primary_key(["id".to_owned()]),
+        );
+        let generated = entities_source(&schema);
+        // Status and StatusEnum belong to the tables; the enum keeps
+        // suffixing until it finds an unclaimed name.
+        assert!(
+            generated.source.contains("pub enum StatusEnumEnum {"),
+            "the suffix re-checks the claimed set:\n{}",
+            generated.source
+        );
+        assert!(generated.source.contains("pub struct Status {"));
+        assert!(generated.source.contains("pub struct StatusEnum {"));
+    }
+
+    #[test]
+    fn tables_casing_identically_take_distinct_struct_names() {
+        let mut schema = SchemaSet::new();
+        for name in ["user_role", "user-role"] {
+            schema.insert(
+                TableDef::new(TableName::new(name))
+                    .with_column(ColumnDef::new("id", ColumnType::Int64).auto_increment())
+                    .with_primary_key(["id".to_owned()]),
+            );
+        }
+        let generated = entities_source(&schema);
+        assert!(generated.source.contains("pub struct UserRole {"));
+        assert!(
+            generated.source.contains("pub struct UserRoleTable {"),
+            "the second table steps aside:\n{}",
+            generated.source
+        );
+        assert!(
+            generated.warnings.iter().any(|w| w.contains("UserRole")),
+            "the rename is reported: {:?}",
+            generated.warnings
+        );
+    }
+
+    #[test]
+    fn non_xid_labels_are_rejected_not_emitted() {
+        let mut schema = SchemaSet::new();
+        // '²' counts as alphanumeric but no Rust identifier may hold it.
+        schema.insert_enum("units", ["m²", "m³"].map(str::to_owned));
+        let generated = entities_source(&schema);
+        assert!(
+            !generated.source.contains("pub enum"),
+            "no broken identifiers are emitted:\n{}",
+            generated.source
+        );
+        assert!(
+            generated.warnings.iter().any(|w| w.contains("units")),
+            "{:?}",
             generated.warnings
         );
     }

@@ -45,6 +45,15 @@ pub enum ExecuteError {
         /// Result shape declared by the rendered statement.
         actual: StatementResult,
     },
+    /// A stored array value holds a state the entity's field type cannot:
+    /// a `NULL` element or extra dimensions. JetORM never writes such
+    /// values; an external writer did.
+    ArrayDecode {
+        /// Zero-based result-set index of the offending column.
+        column: usize,
+        /// What the stored array holds that the field cannot.
+        detail: String,
+    },
     /// One fetched row could not be decoded into the entity's model.
     Decode {
         /// Zero-based index of the offending row in the result set.
@@ -119,6 +128,10 @@ impl fmt::Display for ExecuteError {
             Self::Build(error) => write!(formatter, "query lowering failed: {error}"),
             Self::Render(error) => write!(formatter, "SQL rendering failed: {error}"),
             Self::Database(error) => write!(formatter, "database error: {error}"),
+            Self::ArrayDecode { column, detail } => write!(
+                formatter,
+                "column {column}: {detail}"
+            ),
             Self::MissingBind { position } => write!(
                 formatter,
                 "statement references bind position {position} that the query never captured"
@@ -149,6 +162,7 @@ impl Error for ExecuteError {
             Self::Database(error) => Some(error),
             Self::MissingBind { .. }
             | Self::MalformedBind { .. }
+            | Self::ArrayDecode { .. }
             | Self::Relation { .. }
             | Self::ResultMismatch { .. }
             | Self::ProjectedModelFetch => None,

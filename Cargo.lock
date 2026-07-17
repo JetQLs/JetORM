@@ -1945,6 +1945,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "toml",
+ "unicode-ident",
 ]
 
 [[package]]

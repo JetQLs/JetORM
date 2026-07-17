@@ -80,7 +80,7 @@ fn check_temporal_precision(precision: u8) -> Result<(), RenderError> {
 
 /// Renders a frontend-retained custom type as a quoted, optionally
 /// schema-qualified type identifier.
-fn custom_type_name(name: &str) -> Result<String, RenderError> {
+pub(crate) fn custom_type_name(name: &str) -> Result<String, RenderError> {
     let parts: Vec<&str> = name.split('.').collect();
     if parts.iter().any(|part| part.is_empty()) {
         return Err(RenderError::unsupported(format!(

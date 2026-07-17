@@ -58,8 +58,8 @@ pub use jetorm_executor::{
     ProjectedExecute, SelectExecute, Transaction, load_many, load_one,
 };
 pub use jetorm_query::{
-    ColumnExt, ColumnList, EntityQuery, Expr, LoweringError, OrderKey, Projected, Select,
-    TextColumnExt,
+    CacheableQuery, ColumnExt, ColumnList, CountQuery, EntityQuery, Expr, LoweringError, OrderKey,
+    Projected, Select, TextColumnExt,
 };
 
 /// Single-import surface for application code.

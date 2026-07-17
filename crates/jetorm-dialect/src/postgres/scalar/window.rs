@@ -44,7 +44,7 @@ pub(super) fn render_window_call(
     let ordering = &operands[partition_end..order_end];
     let offsets = &operands[order_end..];
 
-    let call = render_function_call(module, params, scope, function, arguments, false)?;
+    let call = render_function_call(module, params, scope, function, arguments, false, false)?;
     let mut clauses = Vec::new();
     if !partitions.is_empty() {
         let mut expressions = Vec::with_capacity(partitions.len());

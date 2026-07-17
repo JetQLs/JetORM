@@ -2,14 +2,14 @@ use std::{error::Error, fmt};
 
 use afterburner::IntoAfterBurnerIr;
 use afterburner::ir::{
-    BinaryOperator, BlockId, EditError, Field, IrEditor, LogicalOp, Module, OperationSpec,
-    ScalarOp, ScalarType, Schema, SortKey, SqlType, TableRef, TerminatorOp, TimeZone, Type,
-    UnaryOperator, ValueId,
+    BinaryOperator, BlockId, EditError, EffectSet, Field, FunctionRef, IrEditor, LogicalOp, Module,
+    OperationSpec, ScalarOp, ScalarType, Schema, SortKey, SqlType, TableRef, TerminatorOp,
+    TimeZone, Type, UnaryOperator, ValueId, Volatility,
 };
 use jetorm_entity::{ColumnMeta, ColumnType, Entity, TableMeta};
 
-use crate::expr::Predicate;
-use crate::select::Select;
+use crate::expr::{Predicate, SortKeySpec};
+use crate::select::{CountQuery, Select};
 
 /// Fractional-second digits used for every temporal column type.
 ///
@@ -79,6 +79,35 @@ where
     }
 }
 
+impl<E> IntoAfterBurnerIr for CountQuery<E>
+where
+    E: Entity,
+{
+    type Error = LoweringError;
+
+    fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
+        lower_count(&self)
+    }
+}
+
+/// Everything both select and count lowering need about one query, borrowed
+/// from whichever builder is being lowered.
+struct RowPipeline<'query> {
+    filter: Option<&'query Predicate>,
+    distinct: bool,
+    order: &'query [SortKeySpec],
+    has_offset: bool,
+    has_fetch: bool,
+    /// Number of predicate binds; row-count parameters position after them.
+    predicate_binds: usize,
+}
+
+/// State the pipeline leaves behind for the query-specific tail.
+struct LoweredRows {
+    relation: ValueId,
+    field_types: Vec<Type>,
+}
+
 /// Lowers one typed select into a complete, unverified IR module.
 ///
 /// The root block receives the logical pipeline in SQL evaluation order:
@@ -93,116 +122,19 @@ where
     let root = module.root_block();
     {
         let mut editor = module.editor();
-
-        let fields: Vec<Field> = E::COLUMNS
-            .iter()
-            .map(|column| Field::new(column.name(), Type::Scalar(column_scalar_type(column))))
-            .collect();
-        let field_types: Vec<Type> = fields.iter().map(|field| field.ty().clone()).collect();
-        let schema = editor.intern_schema(Schema::new(fields));
-        let relation_type = Type::relation(schema);
-
-        let scan = editor.append_operation(
+        let rows = lower_pipeline::<E>(
+            &mut editor,
             root,
-            OperationSpec::new(LogicalOp::Scan {
-                table: table_ref(&E::TABLE),
-                columns: E::COLUMNS
-                    .iter()
-                    .map(|column| column.name().to_owned())
-                    .collect(),
-            })
-            .with_result(relation_type.clone()),
+            &RowPipeline {
+                filter: select.filter.as_deref(),
+                distinct: select.distinct,
+                order: &select.order,
+                has_offset: select.offset.is_some(),
+                has_fetch: select.fetch.is_some(),
+                predicate_binds: select.binds.len(),
+            },
         )?;
-        let mut relation = editor.result(scan, 0)?;
-
-        if let Some(predicate) = select.filter.as_deref() {
-            let filter = editor.append_operation(
-                root,
-                OperationSpec::new(LogicalOp::Filter)
-                    .with_operands(vec![relation])
-                    .with_result(relation_type.clone()),
-            )?;
-            let region = editor.add_region(filter)?;
-            let block = editor.append_block(region, field_types.clone())?;
-            let (predicate_value, _) = lower_node(&mut editor, block, predicate, E::COLUMNS)?;
-            editor.append_operation(
-                block,
-                OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
-            )?;
-            relation = editor.result(filter, 0)?;
-        }
-
-        if select.distinct {
-            let distinct = editor.append_operation(
-                root,
-                OperationSpec::new(LogicalOp::Distinct)
-                    .with_operands(vec![relation])
-                    .with_result(relation_type.clone()),
-            )?;
-            relation = editor.result(distinct, 0)?;
-        }
-
-        if !select.order.is_empty() {
-            let keys: Vec<SortKey> = select
-                .order
-                .iter()
-                .map(|key| SortKey::new(key.direction, key.null_order))
-                .collect();
-            let sort = editor.append_operation(
-                root,
-                OperationSpec::new(LogicalOp::Sort { keys })
-                    .with_operands(vec![relation])
-                    .with_result(relation_type.clone()),
-            )?;
-            let region = editor.add_region(sort)?;
-            let block = editor.append_block(region, field_types.clone())?;
-            let mut yielded = Vec::with_capacity(select.order.len());
-            for key in &select.order {
-                yielded.push(editor.block_argument(block, key.column)?);
-            }
-            editor.append_operation(
-                block,
-                OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
-            )?;
-            relation = editor.result(sort, 0)?;
-        }
-
-        if select.offset.is_some() || select.fetch.is_some() {
-            // Row counts lower as parameters positioned directly after the
-            // predicate binds — the same order `Select::binds` emits values —
-            // so every page of a paginated query shares one statement.
-            let count_type = Type::scalar(
-                SqlType::Integer {
-                    bits: 64,
-                    signed: true,
-                },
-                false,
-            );
-            let mut operands = vec![relation];
-            let count_slots =
-                usize::from(select.offset.is_some()) + usize::from(select.fetch.is_some());
-            for slot in 0..count_slots {
-                let parameter = editor.append_operation(
-                    root,
-                    OperationSpec::new(ScalarOp::Parameter {
-                        position: (select.binds.len() + slot) as u32,
-                        name: None,
-                    })
-                    .with_result(count_type.clone()),
-                )?;
-                operands.push(editor.result(parameter, 0)?);
-            }
-            let limit = editor.append_operation(
-                root,
-                OperationSpec::new(LogicalOp::Limit {
-                    has_offset: select.offset.is_some(),
-                    has_fetch: select.fetch.is_some(),
-                })
-                .with_operands(operands)
-                .with_result(relation_type.clone()),
-            )?;
-            relation = editor.result(limit, 0)?;
-        }
+        let mut relation = rows.relation;
 
         if let Some(projection) = &select.projection {
             if select.distinct {
@@ -228,7 +160,7 @@ where
                     .with_result(Type::relation(output_schema)),
             )?;
             let region = editor.add_region(project)?;
-            let block = editor.append_block(region, field_types.clone())?;
+            let block = editor.append_block(region, rows.field_types.clone())?;
             let mut yielded = Vec::with_capacity(projection.len());
             for index in projection {
                 yielded.push(editor.block_argument(block, *index)?);
@@ -246,6 +178,203 @@ where
         )?;
     }
     Ok(module)
+}
+
+/// Lowers one typed count into a complete, unverified IR module.
+///
+/// The row pipeline is the select pipeline minus ordering — no ordering can
+/// change how many rows there are — collapsed by a grand-total aggregate
+/// (`Aggregate` with the empty grouping set) yielding a single non-null
+/// `count(*)` value.
+fn lower_count<E>(count: &CountQuery<E>) -> Result<Module, LoweringError>
+where
+    E: Entity,
+{
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let rows = lower_pipeline::<E>(
+            &mut editor,
+            root,
+            &RowPipeline {
+                filter: count.filter.as_deref(),
+                distinct: count.distinct,
+                order: &[],
+                has_offset: count.offset.is_some(),
+                has_fetch: count.fetch.is_some(),
+                predicate_binds: count.binds.len(),
+            },
+        )?;
+
+        let count_type = ScalarType::new(
+            SqlType::Integer {
+                bits: 64,
+                signed: true,
+            },
+            false,
+        );
+        let output_schema = editor.intern_schema(Schema::new(vec![Field::new(
+            "count",
+            Type::Scalar(count_type.clone()),
+        )]));
+        let aggregate = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Aggregate { group_keys: 0 })
+                .with_operands(vec![rows.relation])
+                .with_result(Type::relation(output_schema)),
+        )?;
+        let region = editor.add_region(aggregate)?;
+        let block = editor.append_block(region, rows.field_types)?;
+        let call = editor.append_operation(
+            block,
+            OperationSpec::new(ScalarOp::AggregateCall {
+                function: FunctionRef::new("count"),
+                distinct: false,
+                volatility: Volatility::Immutable,
+                effects: EffectSet::PURE,
+            })
+            .with_result(Type::Scalar(count_type)),
+        )?;
+        let total = editor.result(call, 0)?;
+        editor.append_operation(
+            block,
+            OperationSpec::new(TerminatorOp::Yield).with_operands(vec![total]),
+        )?;
+        let relation = editor.result(aggregate, 0)?;
+        editor.append_operation(
+            root,
+            OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![relation]),
+        )?;
+    }
+    Ok(module)
+}
+
+/// Lowers the row-producing pipeline shared by selects and counts: scan,
+/// filter, distinct, sort, limit, in SQL evaluation order. Captured values
+/// lower to IR parameters whose positions equal the query's bind-table
+/// positions.
+fn lower_pipeline<E>(
+    editor: &mut IrEditor<'_>,
+    root: BlockId,
+    pipeline: &RowPipeline<'_>,
+) -> Result<LoweredRows, LoweringError>
+where
+    E: Entity,
+{
+    let fields: Vec<Field> = E::COLUMNS
+        .iter()
+        .map(|column| Field::new(column.name(), Type::Scalar(column_scalar_type(column))))
+        .collect();
+    let field_types: Vec<Type> = fields.iter().map(|field| field.ty().clone()).collect();
+    let schema = editor.intern_schema(Schema::new(fields));
+    let relation_type = Type::relation(schema);
+
+    let scan = editor.append_operation(
+        root,
+        OperationSpec::new(LogicalOp::Scan {
+            table: table_ref(&E::TABLE),
+            columns: E::COLUMNS
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect(),
+        })
+        .with_result(relation_type.clone()),
+    )?;
+    let mut relation = editor.result(scan, 0)?;
+
+    if let Some(predicate) = pipeline.filter {
+        let filter = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Filter)
+                .with_operands(vec![relation])
+                .with_result(relation_type.clone()),
+        )?;
+        let region = editor.add_region(filter)?;
+        let block = editor.append_block(region, field_types.clone())?;
+        let (predicate_value, _) = lower_node(editor, block, predicate, E::COLUMNS)?;
+        editor.append_operation(
+            block,
+            OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate_value]),
+        )?;
+        relation = editor.result(filter, 0)?;
+    }
+
+    if pipeline.distinct {
+        let distinct = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Distinct)
+                .with_operands(vec![relation])
+                .with_result(relation_type.clone()),
+        )?;
+        relation = editor.result(distinct, 0)?;
+    }
+
+    if !pipeline.order.is_empty() {
+        let keys: Vec<SortKey> = pipeline
+            .order
+            .iter()
+            .map(|key| SortKey::new(key.direction, key.null_order))
+            .collect();
+        let sort = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Sort { keys })
+                .with_operands(vec![relation])
+                .with_result(relation_type.clone()),
+        )?;
+        let region = editor.add_region(sort)?;
+        let block = editor.append_block(region, field_types.clone())?;
+        let mut yielded = Vec::with_capacity(pipeline.order.len());
+        for key in pipeline.order {
+            yielded.push(editor.block_argument(block, key.column)?);
+        }
+        editor.append_operation(
+            block,
+            OperationSpec::new(TerminatorOp::Yield).with_operands(yielded),
+        )?;
+        relation = editor.result(sort, 0)?;
+    }
+
+    if pipeline.has_offset || pipeline.has_fetch {
+        // Row counts lower as parameters positioned directly after the
+        // predicate binds — the same order `Select::binds` emits values —
+        // so every page of a paginated query shares one statement.
+        let count_type = Type::scalar(
+            SqlType::Integer {
+                bits: 64,
+                signed: true,
+            },
+            false,
+        );
+        let mut operands = vec![relation];
+        let count_slots = usize::from(pipeline.has_offset) + usize::from(pipeline.has_fetch);
+        for slot in 0..count_slots {
+            let parameter = editor.append_operation(
+                root,
+                OperationSpec::new(ScalarOp::Parameter {
+                    position: (pipeline.predicate_binds + slot) as u32,
+                    name: None,
+                })
+                .with_result(count_type.clone()),
+            )?;
+            operands.push(editor.result(parameter, 0)?);
+        }
+        let limit = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Limit {
+                has_offset: pipeline.has_offset,
+                has_fetch: pipeline.has_fetch,
+            })
+            .with_operands(operands)
+            .with_result(relation_type.clone()),
+        )?;
+        relation = editor.result(limit, 0)?;
+    }
+
+    Ok(LoweredRows {
+        relation,
+        field_types,
+    })
 }
 
 /// Lowers one predicate node inside a row-lambda block.

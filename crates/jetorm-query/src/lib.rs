@@ -65,12 +65,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cursor;
 mod expr;
 mod join;
 mod lowering;
 mod projection;
 mod select;
 
+pub use cursor::{Cursor, CursorPage};
 pub use expr::{ColumnExt, Expr, OrderKey, TextColumnExt};
 pub use join::JoinSelect;
 pub use lowering::LoweringError;

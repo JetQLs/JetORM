@@ -119,6 +119,64 @@ async fn joins_pair_rows_with_their_relation_in_one_query() {
 
 #[tokio::test]
 #[ignore = "requires a running Docker daemon"]
+async fn related_predicates_filter_and_order_on_the_joined_side() {
+    let (_container, db) = fresh_database().await;
+    seed(&db).await;
+
+    // Filtering on the joined entity: only alice's posts survive.
+    let by_alice = PostEntity::find()
+        .also::<post::Author>()
+        .filter_related(user::Name.eq("alice"))
+        .order_by(post::Id.asc())
+        .all(&db)
+        .await
+        .expect("related-filtered join fetches");
+    let titles: Vec<&str> = by_alice
+        .iter()
+        .map(|(post, _)| post.title.as_str())
+        .collect();
+    assert_eq!(titles, ["intro", "part one"]);
+    assert!(
+        by_alice
+            .iter()
+            .all(|(_, author)| author.as_ref().map(|user| user.name.as_str()) == Some("alice")),
+        "every surviving row joins alice"
+    );
+
+    // A related filter over a LEFT JOIN drops unmatched rows, exactly as
+    // SQL's WHERE over the null-extended side does.
+    let edited_by_bob = PostEntity::find()
+        .also::<post::Editor>()
+        .filter_related(user::Name.eq("bob"))
+        .all(&db)
+        .await
+        .expect("editor filter fetches");
+    assert_eq!(edited_by_bob.len(), 1);
+    assert_eq!(edited_by_bob[0].0.title, "intro");
+
+    // Ordering by the joined column, unmatched rows last by NULL order.
+    let ordered = PostEntity::find()
+        .also::<post::Author>()
+        .order_by_related(user::Name.asc())
+        .order_by(post::Id.asc())
+        .all(&db)
+        .await
+        .expect("related-ordered join fetches");
+    let authors: Vec<Option<&str>> = ordered
+        .iter()
+        .map(|(_, author)| author.as_ref().map(|user| user.name.as_str()))
+        .collect();
+    assert_eq!(
+        authors,
+        [Some("alice"), Some("alice"), Some("bob")],
+        "rows order by the joined author name"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running Docker daemon"]
 async fn inverse_joins_expand_to_many_and_keep_unmatched_rows() {
     let (_container, db) = fresh_database().await;
     seed(&db).await;

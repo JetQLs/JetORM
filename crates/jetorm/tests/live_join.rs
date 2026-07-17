@@ -131,7 +131,10 @@ async fn inverse_joins_expand_to_many_and_keep_unmatched_rows() {
         .all(&db)
         .await
         .expect("inverse join fetches");
-    let pairs: Vec<(&str, Option<&str>)> = rows
+    // The query orders by user id only, so the order of one user's posts is
+    // the server's choice; sorting the pairs keeps the assertion about
+    // membership, not about an order the query never promised.
+    let mut pairs: Vec<(&str, Option<&str>)> = rows
         .iter()
         .map(|(user, post)| {
             (
@@ -140,6 +143,7 @@ async fn inverse_joins_expand_to_many_and_keep_unmatched_rows() {
             )
         })
         .collect();
+    pairs.sort_unstable();
     assert_eq!(
         pairs,
         [

@@ -166,10 +166,15 @@ impl SchemaSet {
                         column: column.clone(),
                     });
                 }
-                // The database drops a column's own constraints with it.
-                definition
-                    .foreign_keys_mut()
-                    .retain(|_, foreign_key| foreign_key.column() != column);
+                // The database drops the altered table's own constraints
+                // involving the column — whether the column is the
+                // referencing side or the referenced side of a
+                // self-reference.
+                definition.foreign_keys_mut().retain(|_, foreign_key| {
+                    foreign_key.column() != column
+                        && !(foreign_key.target_table() == table
+                            && foreign_key.target_column() == column)
+                });
                 Ok(())
             }
             SchemaChange::RenameColumn { table, from, to } => {
@@ -365,15 +370,17 @@ impl SchemaSet {
     }
 
     /// Rejects the change when another table's foreign key targets `table`
-    /// (or one of its columns, when `column` is given). The dropped table's
-    /// own constraints do not count: they vanish with it.
+    /// (or one of its columns, when `column` is given). The altered table's
+    /// own constraints never count: a dropped table takes them along, and a
+    /// dropped column takes the table's constraints involving it along,
+    /// exactly as the database does.
     fn require_unreferenced(
         &self,
         table: &TableName,
         column: Option<&str>,
     ) -> Result<(), ApplyError> {
         for owner in self.tables() {
-            if owner.name() == table && column.is_none() {
+            if owner.name() == table {
                 continue;
             }
             for foreign_key in owner.foreign_keys() {
@@ -381,13 +388,6 @@ impl SchemaSet {
                     continue;
                 }
                 if column.is_some_and(|column| foreign_key.target_column() != column) {
-                    continue;
-                }
-                // Dropping a column also drops constraints it owns, so a
-                // same-column self-reference does not block its own drop.
-                if owner.name() == table
-                    && column.is_some_and(|column| foreign_key.column() == column)
-                {
                     continue;
                 }
                 return Err(ApplyError::StillReferenced {

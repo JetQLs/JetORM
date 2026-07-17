@@ -20,12 +20,12 @@ pub struct UserSummary {
     pub name: String,
 }
 
-/// Field names may differ from column names through the marker override,
-/// and nullable columns must keep their `Option`.
+/// Field names may differ from the entity's through the `column` override,
+/// which names the entity field, and nullable columns keep their `Option`.
 #[derive(Clone, Debug, PartialEq, JetPartial)]
 #[jet(columns = "user")]
 pub struct Contact {
-    #[jet(column = "Email")]
+    #[jet(column = "email")]
     pub address: Option<String>,
     pub name: String,
 }

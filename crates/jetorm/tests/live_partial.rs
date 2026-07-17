@@ -103,5 +103,16 @@ async fn partials_fetch_and_decode_through_the_facade() {
         })
     );
 
+    // The escape hatch cannot silently transpose: executing a projected
+    // select as a full-model fetch is refused, not decoded positionally
+    // into the wrong fields.
+    let error = UserEntity::find()
+        .select_as::<UserSummary>()
+        .into_select()
+        .all(&db)
+        .await
+        .expect_err("a projected select must not fetch full models");
+    assert!(matches!(error, jetorm::ExecuteError::ProjectedModelFetch));
+
     db.close().await;
 }

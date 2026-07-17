@@ -55,6 +55,13 @@ where
     where
         X: Executor,
     {
+        // A projected select's SELECT list is reordered or narrowed, while
+        // full-model decoding is positional over the entity's columns —
+        // same-typed reordered columns would transpose silently. Refuse
+        // instead; `ProjectedExecute` is the typed path.
+        if self.projection().is_some() {
+            return Err(ExecuteError::ProjectedModelFetch);
+        }
         let statement = executor.plan_cache().statement(&self)?;
         let rows = executor
             .fetch_rows(statement, self.into_binds(), full_row_types(E::COLUMNS))

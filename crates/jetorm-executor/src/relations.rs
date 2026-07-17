@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use jetorm_entity::{Column, Entity, Model, Relation, SqlValue};
@@ -62,17 +62,24 @@ where
     R::SourceColumn: Default,
     Key<R>: Eq + Hash + Clone,
     R::TargetColumn: Column<Rust = Key<R>>,
+    SourceModel<R>: Clone,
 {
     let parent_keys: Vec<Option<Key<R>>> = parents
         .iter()
         .map(key_of::<R::TargetColumn, _>)
         .collect::<Result<_, _>>()?;
 
+    // Set-based dedup keeps huge parent lists linear; the vector preserves
+    // first-seen order so the bound statement stays deterministic. The key
+    // count doubles as key multiplicity for the distribution below.
+    let mut remaining: HashMap<Key<R>, usize> = HashMap::new();
     let mut wanted: Vec<Key<R>> = Vec::new();
     for key in parent_keys.iter().flatten() {
-        if !wanted.contains(key) {
+        let count = remaining.entry(key.clone()).or_insert(0);
+        if *count == 0 {
             wanted.push(key.clone());
         }
+        *count += 1;
     }
     if wanted.is_empty() {
         return Ok(parents.iter().map(|_| Vec::new()).collect());
@@ -90,9 +97,26 @@ where
         }
     }
 
+    // Parents sharing a key — the same parent listed twice, or an inverse
+    // edge whose key is not unique — each receive the full group. Only the
+    // last taker moves the group out; earlier takers clone, so the common
+    // all-unique case never clones at all.
     Ok(parent_keys
         .into_iter()
-        .map(|key| key.and_then(|key| grouped.remove(&key)).unwrap_or_default())
+        .map(|key| {
+            let Some(key) = key else {
+                return Vec::new();
+            };
+            let takers = remaining
+                .get_mut(&key)
+                .expect("every parent key was counted above");
+            *takers -= 1;
+            if *takers == 0 {
+                grouped.remove(&key).unwrap_or_default()
+            } else {
+                grouped.get(&key).cloned().unwrap_or_default()
+            }
+        })
         .collect())
 }
 
@@ -123,9 +147,12 @@ where
         .map(key_of::<R::SourceColumn, _>)
         .collect::<Result<_, _>>()?;
 
+    // Set-based dedup keeps huge source lists linear; the vector preserves
+    // first-seen order so the bound statement stays deterministic.
+    let mut seen: HashSet<Key<R>> = HashSet::new();
     let mut wanted: Vec<Key<R>> = Vec::new();
     for key in source_keys.iter().flatten() {
-        if !wanted.contains(key) {
+        if seen.insert(key.clone()) {
             wanted.push(key.clone());
         }
     }

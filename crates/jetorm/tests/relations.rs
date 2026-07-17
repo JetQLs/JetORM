@@ -24,6 +24,25 @@ pub struct Post {
     pub editor_id: Option<i64>,
 }
 
+/// A `_id` field derives its edge name by convention — no `relation` attr.
+#[derive(Clone, Debug, PartialEq, JetModel)]
+#[jet(table = "comments")]
+pub struct Comment {
+    #[jet(primary_key, auto_increment)]
+    pub id: i64,
+    #[jet(references = "user::Id")]
+    pub author_id: i64,
+}
+
+#[test]
+fn relation_names_default_by_stripping_the_id_suffix() {
+    assert_eq!(<comment::Author as Relation>::NAME, "author");
+    assert_eq!(
+        <comment::Author as Relation>::SourceColumn::meta().name(),
+        "author_id"
+    );
+}
+
 #[test]
 fn relation_markers_carry_typed_edges() {
     fn edge<R: Relation>() -> (&'static str, &'static str, &'static str, bool) {

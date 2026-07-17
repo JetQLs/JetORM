@@ -59,18 +59,37 @@ fn parse_container(input: &DeriveInput) -> syn::Result<PartialAttrs> {
     })
 }
 
-/// Marker-identifier override parsed from a field's `#[jet(...)]` attribute.
+/// Entity-field override parsed from a field's `#[jet(...)]` attribute.
+///
+/// The value names the entity's field the same way the entity derive saw
+/// it — `column = "email"` — and goes through the same PascalCase and
+/// keyword-escaping transform, so it always agrees with the marker the
+/// entity derive actually generated (`Email`, or `r#Type` for a field
+/// named `type`). PascalCase input is accepted unchanged.
 fn parse_field_marker(field: &syn::Field) -> syn::Result<Option<syn::Ident>> {
     let mut marker = None;
     for attribute in attrs::jet_attributes(&field.attrs) {
         attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("column") {
-                let literal = meta.value()?.parse::<LitStr>()?;
-                marker = Some(syn::Ident::new(&literal.value(), literal.span()));
-                Ok(())
-            } else {
-                Err(meta.error("unknown field attribute; expected `column`"))
+            if !meta.path.is_ident("column") {
+                return Err(meta.error("unknown field attribute; expected `column`"));
             }
+            let literal = meta.value()?.parse::<LitStr>()?;
+            let name = literal.value();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+            {
+                return Err(syn::Error::new(
+                    literal.span(),
+                    format!("`column = {name:?}` is not a field name"),
+                ));
+            }
+            marker = Some(
+                type_ident(&pascal_case(&name), literal.span())
+                    .map_err(|message| syn::Error::new(literal.span(), message))?,
+            );
+            Ok(())
         })?;
     }
     Ok(marker)

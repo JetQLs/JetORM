@@ -373,5 +373,8 @@ fn column_type_name(column_type: ColumnType) -> String {
         ColumnType::TimestampUtc => format!("timestamptz({TEMPORAL_PRECISION})"),
         ColumnType::Uuid => "uuid".to_owned(),
         ColumnType::Json => "jsonb".to_owned(),
+        ColumnType::ArrayOf(element) => {
+            format!("{}[]", column_type_name(element.as_column_type()))
+        }
     }
 }

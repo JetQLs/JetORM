@@ -92,6 +92,12 @@ fn bind_array<'query>(
         ColumnType::TimestampUtc => query.bind(collect::<DateTime<Utc>>(values, position)?),
         ColumnType::Uuid => query.bind(collect::<Uuid>(values, position)?),
         ColumnType::Json => query.bind(collect::<serde_json::Value>(values, position)?),
+        ColumnType::ArrayOf(_) => {
+            return Err(ExecuteError::MalformedBind {
+                position,
+                detail: "arrays cannot nest".to_owned(),
+            });
+        }
     })
 }
 
@@ -113,6 +119,27 @@ fn bind_null(query: PgQuery<'_>, column_type: ColumnType) -> PgQuery<'_> {
         ColumnType::TimestampUtc => query.bind(None::<DateTime<Utc>>),
         ColumnType::Uuid => query.bind(None::<Uuid>),
         ColumnType::Json => query.bind(None::<serde_json::Value>),
+        ColumnType::ArrayOf(element) => bind_null_array(query, element),
+    }
+}
+
+/// Binds SQL `NULL` typed as an array of the element kind.
+fn bind_null_array(query: PgQuery<'_>, element: jetorm_entity::ElementType) -> PgQuery<'_> {
+    use jetorm_entity::ElementType;
+    match element {
+        ElementType::Boolean => query.bind(None::<Vec<bool>>),
+        ElementType::Int16 => query.bind(None::<Vec<i16>>),
+        ElementType::Int32 => query.bind(None::<Vec<i32>>),
+        ElementType::Int64 => query.bind(None::<Vec<i64>>),
+        ElementType::Float32 => query.bind(None::<Vec<f32>>),
+        ElementType::Float64 => query.bind(None::<Vec<f64>>),
+        ElementType::Decimal => query.bind(None::<Vec<rust_decimal::Decimal>>),
+        ElementType::Text => query.bind(None::<Vec<String>>),
+        ElementType::Date => query.bind(None::<Vec<NaiveDate>>),
+        ElementType::Time => query.bind(None::<Vec<NaiveTime>>),
+        ElementType::Timestamp => query.bind(None::<Vec<NaiveDateTime>>),
+        ElementType::TimestampUtc => query.bind(None::<Vec<DateTime<Utc>>>),
+        ElementType::Uuid => query.bind(None::<Vec<Uuid>>),
     }
 }
 
@@ -157,5 +184,41 @@ pub(crate) fn decode_column(
         ColumnType::TimestampUtc => wrap(row.try_get(index)?, column_type, Value::TimestampUtc),
         ColumnType::Uuid => wrap(row.try_get(index)?, column_type, Value::Uuid),
         ColumnType::Json => wrap(row.try_get(index)?, column_type, Value::Json),
+        ColumnType::ArrayOf(element) => decode_array(row, index, element)?,
+    })
+}
+
+/// Decodes one array column into element values.
+fn decode_array(
+    row: &PgRow,
+    index: usize,
+    element: jetorm_entity::ElementType,
+) -> Result<Value, ExecuteError> {
+    use jetorm_entity::{ElementType, SqlValue};
+
+    fn wrap<T: SqlValue>(decoded: Option<Vec<T>>, element: ElementType) -> Value {
+        match decoded {
+            Some(values) => Value::Array {
+                element: element.as_column_type(),
+                values: values.into_iter().map(SqlValue::into_value).collect(),
+            },
+            None => Value::Null(jetorm_entity::ColumnType::ArrayOf(element)),
+        }
+    }
+
+    Ok(match element {
+        ElementType::Boolean => wrap::<bool>(row.try_get(index)?, element),
+        ElementType::Int16 => wrap::<i16>(row.try_get(index)?, element),
+        ElementType::Int32 => wrap::<i32>(row.try_get(index)?, element),
+        ElementType::Int64 => wrap::<i64>(row.try_get(index)?, element),
+        ElementType::Float32 => wrap::<f32>(row.try_get(index)?, element),
+        ElementType::Float64 => wrap::<f64>(row.try_get(index)?, element),
+        ElementType::Decimal => wrap::<rust_decimal::Decimal>(row.try_get(index)?, element),
+        ElementType::Text => wrap::<String>(row.try_get(index)?, element),
+        ElementType::Date => wrap::<NaiveDate>(row.try_get(index)?, element),
+        ElementType::Time => wrap::<NaiveTime>(row.try_get(index)?, element),
+        ElementType::Timestamp => wrap::<NaiveDateTime>(row.try_get(index)?, element),
+        ElementType::TimestampUtc => wrap::<DateTime<Utc>>(row.try_get(index)?, element),
+        ElementType::Uuid => wrap::<Uuid>(row.try_get(index)?, element),
     })
 }

@@ -73,9 +73,13 @@ impl Value {
             Self::TimestampUtc(_) => ColumnType::TimestampUtc,
             Self::Uuid(_) => ColumnType::Uuid,
             Self::Json(_) => ColumnType::Json,
-            // Columns cannot hold arrays yet, so an array value reports the
-            // kind of its elements — the type a membership test compares.
-            Self::Array { element, .. } => *element,
+            Self::Array { element, .. } => match element_type_of(*element) {
+                // A stored array column reports itself as one.
+                Some(element) => ColumnType::ArrayOf(element),
+                // Membership operands over exotic elements keep reporting
+                // the element kind, the type the comparison addresses.
+                None => *element,
+            },
         }
     }
 
@@ -175,6 +179,71 @@ impl_sql_value!(i64, Int64, Int64);
 impl_sql_value!(f32, Float32, Float32);
 impl_sql_value!(f64, Float64, Float64);
 impl_sql_value!(rust_decimal::Decimal, Decimal, Decimal);
+
+/// Maps a scalar column type onto its array-element form.
+const fn element_type_of(column_type: ColumnType) -> Option<crate::meta::ElementType> {
+    use crate::meta::ElementType;
+    Some(match column_type {
+        ColumnType::Boolean => ElementType::Boolean,
+        ColumnType::Int16 => ElementType::Int16,
+        ColumnType::Int32 => ElementType::Int32,
+        ColumnType::Int64 => ElementType::Int64,
+        ColumnType::Float32 => ElementType::Float32,
+        ColumnType::Float64 => ElementType::Float64,
+        ColumnType::Decimal => ElementType::Decimal,
+        ColumnType::Text => ElementType::Text,
+        ColumnType::Date => ElementType::Date,
+        ColumnType::Time => ElementType::Time,
+        ColumnType::Timestamp => ElementType::Timestamp,
+        ColumnType::TimestampUtc => ElementType::TimestampUtc,
+        ColumnType::Uuid => ElementType::Uuid,
+        ColumnType::Bytes | ColumnType::Json | ColumnType::ArrayOf(_) => return None,
+    })
+}
+
+macro_rules! impl_sql_value_for_array {
+    ($($element:ty => $variant:ident),+ $(,)?) => {
+        $(impl SqlValue for Vec<$element> {
+            const COLUMN_TYPE: ColumnType =
+                ColumnType::ArrayOf(crate::meta::ElementType::$variant);
+
+            fn into_value(self) -> Value {
+                Value::Array {
+                    element: crate::meta::ElementType::$variant.as_column_type(),
+                    values: self.into_iter().map(SqlValue::into_value).collect(),
+                }
+            }
+
+            fn from_value(value: Value) -> Result<Self, ValueTypeMismatch> {
+                match value {
+                    Value::Array { values, .. } => {
+                        values.into_iter().map(SqlValue::from_value).collect()
+                    }
+                    other => Err(ValueTypeMismatch::new(
+                        Self::COLUMN_TYPE,
+                        other.kind_name(),
+                    )),
+                }
+            }
+        })+
+    };
+}
+
+impl_sql_value_for_array!(
+    bool => Boolean,
+    i16 => Int16,
+    i32 => Int32,
+    i64 => Int64,
+    f32 => Float32,
+    f64 => Float64,
+    rust_decimal::Decimal => Decimal,
+    String => Text,
+    chrono::NaiveDate => Date,
+    chrono::NaiveTime => Time,
+    chrono::NaiveDateTime => Timestamp,
+    chrono::DateTime<chrono::Utc> => TimestampUtc,
+    uuid::Uuid => Uuid,
+);
 impl_sql_value!(String, Text, Text);
 impl_sql_value!(Vec<u8>, Bytes, Bytes);
 impl_sql_value!(NaiveDate, Date, Date);

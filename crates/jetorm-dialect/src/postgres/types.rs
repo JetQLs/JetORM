@@ -36,6 +36,10 @@ pub(crate) fn type_name(kind: &SqlType) -> Result<String, RenderError> {
         SqlType::Float { bits } => Err(RenderError::unsupported(format!(
             "PostgreSQL has no {bits}-bit float type"
         ))),
+        // Precision zero is the frontend's unconstrained-numeric sentinel;
+        // bare `numeric` stores exact values without rounding, which is
+        // what a cast must never do.
+        SqlType::Decimal { precision: 0, .. } => Ok("numeric".to_owned()),
         SqlType::Decimal { precision, scale } => Ok(format!("numeric({precision}, {scale})")),
         SqlType::Utf8 => Ok("text".to_owned()),
         SqlType::Binary => Ok("bytea".to_owned()),

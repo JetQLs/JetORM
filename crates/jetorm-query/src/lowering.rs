@@ -716,6 +716,13 @@ fn sql_type(column_type: ColumnType) -> SqlType {
         },
         ColumnType::Float32 => SqlType::Float { bits: 32 },
         ColumnType::Float64 => SqlType::Float { bits: 64 },
+        // Precision zero is the unconstrained-numeric sentinel: the dialect
+        // renders it as bare `numeric`, so no cast ever rounds a bound
+        // value. A declared precision would become `numeric(p, s)` casts.
+        ColumnType::Decimal => SqlType::Decimal {
+            precision: 0,
+            scale: 0,
+        },
         ColumnType::Text => SqlType::Utf8,
         ColumnType::Bytes => SqlType::Binary,
         ColumnType::Date => SqlType::Date,

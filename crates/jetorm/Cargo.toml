@@ -31,6 +31,8 @@ jetorm-query.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 testcontainers-modules.workspace = true

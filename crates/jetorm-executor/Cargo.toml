@@ -22,11 +22,13 @@ jetorm-dialect.workspace = true
 jetorm-entity.workspace = true
 jetorm-query.workspace = true
 moka.workspace = true
+rust_decimal.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+serde.workspace = true
 jetorm-derive.workspace = true
 jetorm-schema.workspace = true
 testcontainers-modules.workspace = true

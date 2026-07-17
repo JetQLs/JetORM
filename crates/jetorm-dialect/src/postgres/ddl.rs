@@ -295,6 +295,7 @@ fn column_type_name(column_type: ColumnType) -> String {
         ColumnType::Int64 => "bigint".to_owned(),
         ColumnType::Float32 => "real".to_owned(),
         ColumnType::Float64 => "double precision".to_owned(),
+        ColumnType::Decimal => "numeric".to_owned(),
         ColumnType::Text => "text".to_owned(),
         ColumnType::Bytes => "bytea".to_owned(),
         ColumnType::Date => "date".to_owned(),

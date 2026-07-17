@@ -25,6 +25,8 @@ pub enum Value {
     Float32(f32),
     /// 64-bit floating-point value.
     Float64(f64),
+    /// Exact decimal value.
+    Decimal(rust_decimal::Decimal),
     /// Unicode text value.
     Text(String),
     /// Opaque byte-sequence value.
@@ -62,6 +64,7 @@ impl Value {
             Self::Int64(_) => ColumnType::Int64,
             Self::Float32(_) => ColumnType::Float32,
             Self::Float64(_) => ColumnType::Float64,
+            Self::Decimal(_) => ColumnType::Decimal,
             Self::Text(_) => ColumnType::Text,
             Self::Bytes(_) => ColumnType::Bytes,
             Self::Date(_) => ColumnType::Date,
@@ -93,6 +96,7 @@ impl Value {
             Self::Int64(_) => "int64",
             Self::Float32(_) => "float32",
             Self::Float64(_) => "float64",
+            Self::Decimal(_) => "decimal",
             Self::Text(_) => "text",
             Self::Bytes(_) => "bytes",
             Self::Date(_) => "date",
@@ -158,6 +162,7 @@ impl_sql_value!(i32, Int32, Int32);
 impl_sql_value!(i64, Int64, Int64);
 impl_sql_value!(f32, Float32, Float32);
 impl_sql_value!(f64, Float64, Float64);
+impl_sql_value!(rust_decimal::Decimal, Decimal, Decimal);
 impl_sql_value!(String, Text, Text);
 impl_sql_value!(Vec<u8>, Bytes, Bytes);
 impl_sql_value!(NaiveDate, Date, Date);

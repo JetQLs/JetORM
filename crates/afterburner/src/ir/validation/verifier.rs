@@ -183,9 +183,7 @@ impl Verifier<'_> {
                         format!("float width {bits} is unsupported"),
                     );
                 }
-                SqlType::Decimal { precision, scale }
-                    if invalid_decimal(*precision, *scale) =>
-                {
+                SqlType::Decimal { precision, scale } if invalid_decimal(*precision, *scale) => {
                     self.error(
                         VerificationLocation::Schema(schema),
                         "decimal precision must be positive and cover the scale",

@@ -45,11 +45,11 @@
 #![warn(missing_docs)]
 
 pub use afterburner::{AfterBurnerError, AfterBurnerOptions, IntoAfterBurnerIr, afterburner, ir};
-pub use jetorm_derive::{JetModel, JetPartial};
+pub use jetorm_derive::{JetEnum, JetModel, JetPartial};
 pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement};
 pub use jetorm_entity::{
     Column, ColumnMeta, ColumnType, DecodeError, Entity, ForeignKeyMeta, ForeignKeyRef, Inverse,
-    Model, ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta, Value,
+    Json, Model, ReferentialAction, Relation, SingleKeyEntity, SqlValue, TableMeta, Value,
     ValueTypeMismatch,
 };
 #[cfg(feature = "executor")]
@@ -66,8 +66,9 @@ pub use jetorm_query::{
 /// Single-import surface for application code.
 pub mod prelude {
     pub use crate::{
-        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, Inverse, JetModel, JetPartial,
-        Model, OrderKey, Projected, Relation, Select, SqlValue, TextColumnExt, Value,
+        Column, ColumnExt, ColumnList, Entity, EntityQuery, Expr, Inverse, JetEnum, JetModel,
+        JetPartial, Json, Model, OrderKey, Projected, Relation, Select, SqlValue, TextColumnExt,
+        Value,
     };
     #[cfg(feature = "executor")]
     pub use crate::{

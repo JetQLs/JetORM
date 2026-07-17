@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 clap.workspace = true
+jetorm-entity.workspace = true
 jetorm-executor.workspace = true
 jetorm-migration.workspace = true
 jetorm-schema.workspace = true
@@ -25,6 +26,7 @@ toml.workspace = true
 
 [dev-dependencies]
 jetorm-entity.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 testcontainers-modules.workspace = true
 tokio.workspace = true

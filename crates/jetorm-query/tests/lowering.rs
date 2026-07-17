@@ -74,7 +74,7 @@ impl Model for User {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Id;
 
 impl Column for Id {
@@ -238,4 +238,45 @@ fn model_round_trips_through_positional_values() {
         ]
     );
     assert_eq!(User::from_values(values), Ok(user));
+}
+
+// UserEntity has a single-column key, so by-id lookup is available.
+impl jetorm_entity::SingleKeyEntity for UserEntity {
+    type PrimaryKeyColumn = Id;
+}
+
+#[test]
+fn find_by_id_is_a_primary_key_equality_over_one_bind() {
+    let query = UserEntity::find_by_id(7);
+    assert_eq!(query.binds(), [Value::Int64(7)]);
+    afterburner!(query).expect("by-id lookup lowers to verified IR");
+
+    // The same shape as the handwritten equivalent, so they share a plan.
+    assert_eq!(
+        UserEntity::find_by_id(7).shape(),
+        UserEntity::find().filter(Id.eq(7)).shape()
+    );
+}
+
+#[test]
+fn between_is_an_inclusive_range() {
+    let query = UserEntity::find().filter(Id.between(10, 20));
+    assert_eq!(query.binds(), [Value::Int64(10), Value::Int64(20)]);
+    afterburner!(query).expect("range predicate lowers to verified IR");
+}
+
+#[test]
+fn substring_operators_escape_like_metacharacters() {
+    let query = UserEntity::find().filter(Name.contains(r"50%_off\now"));
+    assert_eq!(
+        query.binds(),
+        [Value::Text(r"%50\%\_off\\now%".to_owned())],
+        "the needle must match itself literally, not act as a pattern"
+    );
+
+    let prefix = UserEntity::find().filter(Name.starts_with("a_b"));
+    assert_eq!(prefix.binds(), [Value::Text(r"a\_b%".to_owned())]);
+
+    let suffix = UserEntity::find().filter(Name.ends_with("100%"));
+    assert_eq!(suffix.binds(), [Value::Text(r"%100\%".to_owned())]);
 }

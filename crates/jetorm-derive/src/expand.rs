@@ -227,7 +227,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         );
         quote! {
             #[doc = #doc]
-            #[derive(Clone, Copy, Debug)]
+            #[derive(Clone, Copy, Debug, Default)]
             pub struct #marker_ident;
 
             #[automatically_derived]
@@ -236,6 +236,21 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 type Rust = #inner_ty;
                 const INDEX: usize = #index;
                 const NULLABLE: bool = #nullable;
+            }
+        }
+    });
+
+    let primary_key_markers: Vec<&Ident> = columns
+        .iter()
+        .filter(|column| column.attrs.primary_key)
+        .map(|column| &column.marker_ident)
+        .collect();
+    let single_key_impl = (primary_key_markers.len() == 1).then(|| {
+        let marker = primary_key_markers[0];
+        quote! {
+            #[automatically_derived]
+            impl #cr::SingleKeyEntity for #entity_ident {
+                type PrimaryKeyColumn = #module_ident::#marker;
             }
         }
     });
@@ -280,6 +295,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 })
             }
         }
+
+        #single_key_impl
 
         #[doc = #module_doc]
         #vis mod #module_ident {

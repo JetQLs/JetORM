@@ -2,12 +2,13 @@ use std::future::Future;
 use std::sync::Arc;
 
 use jetorm_dialect::Statement;
-use jetorm_entity::Value;
-use sqlx::postgres::{PgConnection, PgPool, PgRow};
+use jetorm_entity::{ColumnMeta, Value};
+use sqlx::postgres::{PgConnection, PgPool};
 
 use crate::error::ExecuteError;
 use crate::plan::PlanCache;
-use crate::value::build_query;
+use crate::row::JetRow;
+use crate::value::{build_query, decode_row};
 
 mod sealed {
     /// Prevents downstream `Executor` implementations, keeping the driver
@@ -29,13 +30,18 @@ pub trait Executor: sealed::Sealed + Send + Sized {
     #[doc(hidden)]
     fn plan_cache(&self) -> &PlanCache;
 
-    /// Fetches every row produced by one bound statement.
+    /// Fetches every row produced by one bound statement, decoded into
+    /// positional values for the given column layout.
+    ///
+    /// No driver type crosses this boundary: implementations convert their
+    /// native rows into [`JetRow`]s.
     #[doc(hidden)]
     fn fetch_rows(
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-    ) -> impl Future<Output = Result<Vec<PgRow>, ExecuteError>> + Send;
+        columns: &'static [ColumnMeta],
+    ) -> impl Future<Output = Result<Vec<JetRow>, ExecuteError>> + Send;
 }
 
 /// A PostgreSQL connection pool with its shared plan cache.
@@ -159,9 +165,11 @@ impl Executor for &Database {
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-    ) -> Result<Vec<PgRow>, ExecuteError> {
+        columns: &'static [ColumnMeta],
+    ) -> Result<Vec<JetRow>, ExecuteError> {
         let query = build_query(&statement, &binds)?;
-        Ok(query.fetch_all(&self.pool).await?)
+        let rows = query.fetch_all(&self.pool).await?;
+        rows.iter().map(|row| decode_row(row, columns)).collect()
     }
 }
 
@@ -217,8 +225,10 @@ impl Executor for &mut Transaction<'_> {
         self,
         statement: Arc<Statement>,
         binds: Vec<Value>,
-    ) -> Result<Vec<PgRow>, ExecuteError> {
+        columns: &'static [ColumnMeta],
+    ) -> Result<Vec<JetRow>, ExecuteError> {
         let query = build_query(&statement, &binds)?;
-        Ok(query.fetch_all(&mut *self.inner).await?)
+        let rows = query.fetch_all(&mut *self.inner).await?;
+        rows.iter().map(|row| decode_row(row, columns)).collect()
     }
 }

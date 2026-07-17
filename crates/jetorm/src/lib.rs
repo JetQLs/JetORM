@@ -48,12 +48,13 @@ pub use afterburner::{AfterBurnerError, AfterBurnerOptions, IntoAfterBurnerIr, a
 pub use jetorm_derive::JetModel;
 pub use jetorm_dialect::{Dialect, Postgres, RenderError, Statement};
 pub use jetorm_entity::{
-    Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SqlValue, TableMeta, Value,
-    ValueTypeMismatch,
+    Column, ColumnMeta, ColumnType, DecodeError, Entity, Model, SingleKeyEntity, SqlValue,
+    TableMeta, Value, ValueTypeMismatch,
 };
 #[cfg(feature = "executor")]
 pub use jetorm_executor::{
-    Database, DatabaseOptions, ExecuteError, Executor, PlanCache, SelectExecute, Transaction,
+    Database, DatabaseOptions, ErrorKind, ExecuteError, Executor, JetRow, PlanCache, SelectExecute,
+    Transaction,
 };
 pub use jetorm_query::{
     ColumnExt, EntityQuery, Expr, LoweringError, OrderKey, Select, TextColumnExt,

@@ -33,9 +33,54 @@ pub enum ExecuteError {
     },
 }
 
+/// Driver-independent classification of an execution failure.
+///
+/// Callers branch on this instead of parsing SQLSTATE codes or matching
+/// driver error types, so handling "the email is taken" never couples an
+/// application to `sqlx` internals. The set grows with JetORM's feature
+/// surface; unknown variants must be handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// A unique constraint rejected a duplicate value.
+    UniqueViolation,
+    /// A foreign-key constraint rejected the change.
+    ForeignKeyViolation,
+    /// A `NOT NULL` constraint rejected an absent value.
+    NotNullViolation,
+    /// A `CHECK` constraint rejected the change.
+    CheckViolation,
+    /// The connection could not be established, timed out, or was lost.
+    Connection,
+    /// A failure outside the classified cases.
+    Other,
+}
+
 impl ExecuteError {
     pub(crate) const fn lowering(error: LoweringError) -> Self {
         Self::Build(error)
+    }
+
+    /// Classifies this failure independently of the driver.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        let Self::Database(error) = self else {
+            return ErrorKind::Other;
+        };
+        match error {
+            sqlx::Error::Database(database) => match database.kind() {
+                sqlx::error::ErrorKind::UniqueViolation => ErrorKind::UniqueViolation,
+                sqlx::error::ErrorKind::ForeignKeyViolation => ErrorKind::ForeignKeyViolation,
+                sqlx::error::ErrorKind::NotNullViolation => ErrorKind::NotNullViolation,
+                sqlx::error::ErrorKind::CheckViolation => ErrorKind::CheckViolation,
+                _ => ErrorKind::Other,
+            },
+            sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_) => ErrorKind::Connection,
+            _ => ErrorKind::Other,
+        }
     }
 }
 

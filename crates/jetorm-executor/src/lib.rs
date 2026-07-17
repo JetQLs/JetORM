@@ -57,6 +57,7 @@
 
 mod database;
 mod error;
+mod join;
 mod plan;
 mod relations;
 mod row;
@@ -65,6 +66,7 @@ mod value;
 
 pub use database::{Database, DatabaseOptions, Executor, Transaction};
 pub use error::{ErrorKind, ExecuteError};
+pub use join::JoinExecute;
 pub use plan::PlanCache;
 pub use relations::{load_many, load_one};
 pub use row::JetRow;

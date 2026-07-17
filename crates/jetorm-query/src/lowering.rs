@@ -2,13 +2,14 @@ use std::{error::Error, fmt};
 
 use afterburner::IntoAfterBurnerIr;
 use afterburner::ir::{
-    BinaryOperator, BlockId, EditError, EffectSet, Field, FunctionRef, IrEditor, LogicalOp, Module,
-    OperationSpec, ScalarOp, ScalarType, Schema, SortKey, SqlType, TableRef, TerminatorOp,
-    TimeZone, Type, UnaryOperator, ValueId, Volatility,
+    BinaryOperator, BlockId, EditError, EffectSet, Field, FunctionRef, IrEditor, JoinKind,
+    LogicalOp, Module, OperationSpec, ScalarOp, ScalarType, Schema, SortKey, SqlType, TableRef,
+    TerminatorOp, TimeZone, Type, UnaryOperator, ValueId, Volatility,
 };
-use jetorm_entity::{ColumnMeta, ColumnType, Entity, TableMeta};
+use jetorm_entity::{Column, ColumnMeta, ColumnType, Entity, Relation, TableMeta};
 
 use crate::expr::{Predicate, SortKeySpec};
+use crate::join::JoinSelect;
 use crate::select::{CountQuery, Select};
 
 /// Fractional-second digits used for every temporal column type.
@@ -37,6 +38,10 @@ pub enum LoweringError {
     /// (deduplicate the full row, or the projected row?) is not expressible
     /// yet. Remove one of the two.
     DistinctOverProjection,
+    /// The query combined a relation join with `DISTINCT`, whose meaning
+    /// (deduplicate the source row, or the joined pair?) is not expressible
+    /// yet. Remove one of the two.
+    DistinctOverJoin,
 }
 
 impl fmt::Display for LoweringError {
@@ -49,6 +54,9 @@ impl fmt::Display for LoweringError {
             ),
             Self::DistinctOverProjection => formatter
                 .write_str("distinct combined with a column projection is not supported yet"),
+            Self::DistinctOverJoin => {
+                formatter.write_str("distinct combined with a relation join is not supported yet")
+            }
         }
     }
 }
@@ -57,7 +65,9 @@ impl Error for LoweringError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Internal(error) => Some(error),
-            Self::OperandKindMismatch { .. } | Self::DistinctOverProjection => None,
+            Self::OperandKindMismatch { .. }
+            | Self::DistinctOverProjection
+            | Self::DistinctOverJoin => None,
         }
     }
 }
@@ -87,6 +97,17 @@ where
 
     fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
         lower_count(&self)
+    }
+}
+
+impl<R> IntoAfterBurnerIr for JoinSelect<R>
+where
+    R: Relation,
+{
+    type Error = LoweringError;
+
+    fn into_afterburner_ir(self) -> Result<Module, Self::Error> {
+        lower_join(&self)
     }
 }
 
@@ -250,6 +271,110 @@ where
     Ok(module)
 }
 
+/// Lowers one relation join into a complete, unverified IR module.
+///
+/// The module scans both entities, `LEFT JOIN`s them on the relation's
+/// column pair, and then applies the source query's row stages to the
+/// joined relation. Source fields keep their leading positions, so filter
+/// predicates and sort keys keep addressing them unchanged; target fields
+/// follow with nullability widened, as SQL widens the null-extended side.
+fn lower_join<R>(join: &JoinSelect<R>) -> Result<Module, LoweringError>
+where
+    R: Relation,
+{
+    if join.select.distinct {
+        return Err(LoweringError::DistinctOverJoin);
+    }
+
+    let mut module = Module::new();
+    let root = module.root_block();
+    {
+        let mut editor = module.editor();
+        let (source, _, source_types) = scan_entity::<R::Source>(&mut editor, root)?;
+        let (target, _, target_types) = scan_entity::<R::Target>(&mut editor, root)?;
+
+        // Output schema: source row as-is, then the target row widened to
+        // nullable — an unmatched left row null-extends it. Target field
+        // names take the relation as a prefix so the two sides can never
+        // collide (schemas reject duplicate names).
+        let mut fields: Vec<Field> = R::Source::COLUMNS
+            .iter()
+            .map(|column| Field::new(column.name(), Type::Scalar(column_scalar_type(column))))
+            .collect();
+        for column in R::Target::COLUMNS {
+            fields.push(Field::new(
+                format!("{}__{}", R::NAME, column.name()),
+                Type::Scalar(column_scalar_type(column).with_nullability(true)),
+            ));
+        }
+        let joined_types: Vec<Type> = fields.iter().map(|field| field.ty().clone()).collect();
+        let joined_schema = editor.intern_schema(Schema::new(fields));
+        let joined_type = Type::relation(joined_schema);
+
+        let join_op = editor.append_operation(
+            root,
+            OperationSpec::new(LogicalOp::Join {
+                kind: JoinKind::Left,
+                has_condition: true,
+            })
+            .with_operands(vec![source, target])
+            .with_result(joined_type.clone()),
+        )?;
+        // The condition evaluates before null extension, so its block sees
+        // both rows with their original types.
+        let region = editor.add_region(join_op)?;
+        let mut condition_types = source_types.clone();
+        condition_types.extend(target_types);
+        let block = editor.append_block(region, condition_types)?;
+        let left = (
+            editor.block_argument(block, <R::SourceColumn as Column>::INDEX)?,
+            column_scalar_type(&R::Source::COLUMNS[<R::SourceColumn as Column>::INDEX]),
+        );
+        let right = (
+            editor.block_argument(
+                block,
+                R::Source::COLUMNS.len() + <R::TargetColumn as Column>::INDEX,
+            )?,
+            column_scalar_type(&R::Target::COLUMNS[<R::TargetColumn as Column>::INDEX]),
+        );
+        let (left_value, right_value, unified) =
+            unify_nullability(&mut editor, block, left, right)?;
+        let equality = editor.append_operation(
+            block,
+            OperationSpec::new(ScalarOp::Binary(BinaryOperator::Equal))
+                .with_operands(vec![left_value, right_value])
+                .with_result(Type::scalar(SqlType::Boolean, unified.is_nullable())),
+        )?;
+        let predicate = editor.result(equality, 0)?;
+        editor.append_operation(
+            block,
+            OperationSpec::new(TerminatorOp::Yield).with_operands(vec![predicate]),
+        )?;
+        let joined = editor.result(join_op, 0)?;
+
+        let rows = lower_row_stages::<R::Source>(
+            &mut editor,
+            root,
+            joined,
+            joined_type,
+            joined_types,
+            &RowPipeline {
+                filter: join.select.filter.as_deref(),
+                distinct: false,
+                order: &join.select.order,
+                has_offset: join.select.offset.is_some(),
+                has_fetch: join.select.fetch.is_some(),
+                predicate_binds: join.select.binds.len(),
+            },
+        )?;
+        editor.append_operation(
+            root,
+            OperationSpec::new(TerminatorOp::QueryReturn).with_operands(vec![rows.relation]),
+        )?;
+    }
+    Ok(module)
+}
+
 /// Lowers the row-producing pipeline shared by selects and counts: scan,
 /// filter, distinct, sort, limit, in SQL evaluation order. Captured values
 /// lower to IR parameters whose positions equal the query's bind-table
@@ -259,6 +384,19 @@ fn lower_pipeline<E>(
     root: BlockId,
     pipeline: &RowPipeline<'_>,
 ) -> Result<LoweredRows, LoweringError>
+where
+    E: Entity,
+{
+    let (relation, relation_type, field_types) = scan_entity::<E>(editor, root)?;
+    lower_row_stages::<E>(editor, root, relation, relation_type, field_types, pipeline)
+}
+
+/// Appends one entity scan and returns its relation, relation type, and the
+/// row's field types for later region blocks.
+fn scan_entity<E>(
+    editor: &mut IrEditor<'_>,
+    root: BlockId,
+) -> Result<(ValueId, Type, Vec<Type>), LoweringError>
 where
     E: Entity,
 {
@@ -281,8 +419,26 @@ where
         })
         .with_result(relation_type.clone()),
     )?;
-    let mut relation = editor.result(scan, 0)?;
+    Ok((editor.result(scan, 0)?, relation_type, field_types))
+}
 
+/// Applies the row stages — filter, distinct, sort, limit — to one relation.
+///
+/// The relation's leading fields must be `E`'s columns in declaration order:
+/// filter predicates and sort keys address them positionally, which is what
+/// lets the same stages run over a bare scan and over a join whose left side
+/// is the entity.
+fn lower_row_stages<E>(
+    editor: &mut IrEditor<'_>,
+    root: BlockId,
+    mut relation: ValueId,
+    relation_type: Type,
+    field_types: Vec<Type>,
+    pipeline: &RowPipeline<'_>,
+) -> Result<LoweredRows, LoweringError>
+where
+    E: Entity,
+{
     if let Some(predicate) = pipeline.filter {
         let filter = editor.append_operation(
             root,

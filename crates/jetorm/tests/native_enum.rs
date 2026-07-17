@@ -117,6 +117,42 @@ fn enum_ddl_spells_create_type_and_typed_columns() {
     );
 }
 
+#[test]
+fn enum_columns_are_typed_inside_and_text_at_the_edge() {
+    use jetorm::{Dialect, IntoAfterBurnerIr, Postgres};
+
+    let query = ArticleEntity::find().filter(article::Status.eq(Status::Published));
+    let module = query.into_afterburner_ir().expect("enum filter lowers");
+    let statement = Postgres.render_query(&module).expect("enum filter renders");
+    let sql = statement.sql();
+    assert!(
+        sql.contains("$1::\"article_status\""),
+        "the bind casts to the named type: {sql}"
+    );
+    assert!(
+        sql.contains("\"status\"::text AS \"status\""),
+        "the output crosses the wire as text: {sql}"
+    );
+
+    let insert = ArticleEntity::insert(Article {
+        id: 0,
+        status: Status::Draft,
+        note: None,
+    })
+    .returning();
+    let module = insert.into_afterburner_ir().expect("enum insert lowers");
+    let statement = Postgres.render_query(&module).expect("enum insert renders");
+    let sql = statement.sql();
+    assert!(
+        sql.contains("::\"article_status\""),
+        "the inserted value casts to the named type: {sql}"
+    );
+    assert!(
+        sql.contains("RETURNING \"id\", \"status\"::text AS \"status\", \"note\""),
+        "returning hands the enum back as text: {sql}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires a running Docker daemon"]
 async fn enum_ddl_round_trips_on_live_postgres() {
@@ -174,6 +210,70 @@ async fn enum_ddl_round_trips_on_live_postgres() {
         .execute(db.pool())
         .await
         .expect("the appended variant inserts");
+
+    // The full JetORM path over the native column: typed insert with
+    // returning, enum-valued filters, and ordering by declaration order —
+    // the semantic native enums buy over text.
+    let created = ArticleEntity::insert(Article {
+        id: 0,
+        status: Status::Draft,
+        note: Some("typed".to_owned()),
+    })
+    .returning()
+    .all(&db)
+    .await
+    .expect("typed insert returns");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].status, Status::Draft);
+
+    let drafts = ArticleEntity::find()
+        .filter(article::Status.eq(Status::Draft))
+        .all(&db)
+        .await
+        .expect("enum filter runs");
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].note.as_deref(), Some("typed"));
+
+    // Declaration order, not alphabetical: the appended variant sorts
+    // last by declaration despite "retracted" sorting between "live" and
+    // nothing alphabetically after "draft"/"live" would prove less.
+    let last_raw: (String,) =
+        sqlx::query_as("SELECT status::text FROM articles ORDER BY status DESC LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("raw order check");
+    assert_eq!(
+        last_raw.0, "retracted",
+        "the appended variant sorts last by declaration order"
+    );
+
+    // A stored variant the Rust enum does not declare is a decode error,
+    // never a silent default — remove it before the typed reads.
+    let undeclared = ArticleEntity::find()
+        .filter(
+            article::Status
+                .eq(Status::Draft)
+                .or(article::Status.eq(Status::Published)),
+        )
+        .all(&db)
+        .await;
+    assert!(
+        undeclared.is_ok(),
+        "filtered reads avoid the foreign variant"
+    );
+    sqlx::query("DELETE FROM articles WHERE status = 'retracted'")
+        .execute(db.pool())
+        .await
+        .expect("cleanup runs");
+    let all_typed = ArticleEntity::find()
+        .all(&db)
+        .await
+        .expect("every remaining row decodes");
+    assert!(
+        all_typed
+            .iter()
+            .all(|article| matches!(article.status, Status::Draft | Status::Published))
+    );
 
     db.close().await;
 }

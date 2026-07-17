@@ -12,6 +12,8 @@ use jetorm_entity::{Column, ColumnType, Entity, SqlValue, Value};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OperandType {
     pub(crate) column_type: ColumnType,
+    /// Named database type overriding the column type's spelling.
+    pub(crate) type_name: Option<&'static str>,
     pub(crate) nullable: bool,
     /// Whether the operand is an array of `column_type` elements.
     pub(crate) list: bool,
@@ -25,6 +27,7 @@ impl OperandType {
     {
         Self {
             column_type: T::COLUMN_TYPE_OF,
+            type_name: T::TYPE_NAME_OF,
             nullable: T::NULLABLE_OF,
             list: false,
         }
@@ -38,6 +41,7 @@ impl OperandType {
         let meta = C::meta();
         Self {
             column_type: meta.column_type(),
+            type_name: meta.type_name(),
             nullable: meta.is_nullable(),
             list: false,
         }
@@ -322,6 +326,9 @@ pub trait ColumnExt: Column + Sized {
                 value: Value::Array { element, values },
                 ty: OperandType {
                     column_type: element,
+                    // Membership over a named-type column casts its array
+                    // to that type.
+                    type_name: Self::meta().type_name(),
                     nullable: false,
                     list: true,
                 },
@@ -443,6 +450,7 @@ where
                 value,
                 ty: OperandType {
                     column_type: meta.column_type(),
+                    type_name: meta.type_name(),
                     nullable: meta.is_nullable(),
                     list: false,
                 },

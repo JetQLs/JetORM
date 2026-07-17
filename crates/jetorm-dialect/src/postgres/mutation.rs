@@ -36,6 +36,13 @@ impl<'module> Renderer<'module> {
                 "mutation renderer received a non-mutation operation",
             ));
         };
+        let result_schema = operation
+            .results()
+            .first()
+            .and_then(|value| self.module.value(*value))
+            .map(afterburner::ir::Value::ty)
+            .and_then(afterburner::ir::Type::as_relation)
+            .and_then(|schema| self.module.schema(schema));
         match mutation {
             MutationOp::Insert {
                 table,
@@ -93,7 +100,7 @@ impl<'module> Renderer<'module> {
                         }
                     }
                 }
-                append_returning(&mut sql, returning)?;
+                append_returning_typed(&mut sql, returning, result_schema)?;
                 Ok(sql)
             }
             MutationOp::Update {
@@ -123,7 +130,7 @@ impl<'module> Renderer<'module> {
                     quote_identifier("t0")?,
                     rendered.join(", ")
                 );
-                append_returning(&mut sql, returning)?;
+                append_returning_typed(&mut sql, returning, result_schema)?;
                 Ok(sql)
             }
             MutationOp::Delete {
@@ -141,7 +148,7 @@ impl<'module> Renderer<'module> {
                     table_sql(table)?,
                     quote_identifier("t0")?
                 );
-                append_returning(&mut sql, returning)?;
+                append_returning_typed(&mut sql, returning, result_schema)?;
                 Ok(sql)
             }
         }
@@ -207,5 +214,41 @@ fn append_returning(sql: &mut String, columns: &[String]) -> Result<(), RenderEr
         sql.push_str(" RETURNING ");
         sql.push_str(&quote_list(columns)?);
     }
+    Ok(())
+}
+
+/// Appends `RETURNING`, handing named-type columns to the driver as text —
+/// the same wire contract the query renderer applies at its outermost
+/// select.
+fn append_returning_typed(
+    sql: &mut String,
+    columns: &[String],
+    schema: Option<&afterburner::ir::Schema>,
+) -> Result<(), RenderError> {
+    let Some(schema) = schema else {
+        return append_returning(sql, columns);
+    };
+    if columns.is_empty() {
+        return Ok(());
+    }
+    sql.push_str(" RETURNING ");
+    let mut rendered = Vec::with_capacity(columns.len());
+    for column in columns {
+        let quoted = quote_identifier(column)?;
+        let is_custom = schema.fields().iter().any(|field| {
+            field.name() == column
+                && matches!(
+                    field.ty(),
+                    afterburner::ir::Type::Scalar(scalar)
+                        if matches!(scalar.kind(), afterburner::ir::SqlType::Custom(_))
+                )
+        });
+        if is_custom {
+            rendered.push(format!("{quoted}::text AS {quoted}"));
+        } else {
+            rendered.push(quoted);
+        }
+    }
+    sql.push_str(&rendered.join(", "));
     Ok(())
 }

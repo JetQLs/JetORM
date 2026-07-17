@@ -184,7 +184,7 @@ impl Verifier<'_> {
                     );
                 }
                 SqlType::Decimal { precision, scale }
-                    if *precision == 0 || scale.unsigned_abs() > *precision =>
+                    if invalid_decimal(*precision, *scale) =>
                 {
                     self.error(
                         VerificationLocation::Schema(schema),
@@ -1876,6 +1876,20 @@ fn literal_matches_type(literal: &Literal, ty: &Type) -> bool {
     }
 }
 
+/// Rejects impossible decimal declarations while admitting the
+/// unconstrained form.
+///
+/// Precision zero with scale zero denotes a decimal with no declared
+/// precision — arbitrary exact numerics, as SQL's bare `NUMERIC` — so only
+/// a zero precision paired with a nonzero scale, or a scale wider than a
+/// declared precision, is an error.
+const fn invalid_decimal(precision: u16, scale: i16) -> bool {
+    if precision == 0 {
+        return scale != 0;
+    }
+    scale.unsigned_abs() > precision
+}
+
 fn scalar_type_error(ty: &SqlType) -> Option<String> {
     match ty {
         SqlType::Integer { bits, .. } if !matches!(bits, 8 | 16 | 32 | 64 | 128) => {
@@ -1884,9 +1898,7 @@ fn scalar_type_error(ty: &SqlType) -> Option<String> {
         SqlType::Float { bits } if !matches!(bits, 16 | 32 | 64 | 128) => {
             Some(format!("float width {bits} is unsupported"))
         }
-        SqlType::Decimal { precision, scale }
-            if *precision == 0 || scale.unsigned_abs() > *precision =>
-        {
+        SqlType::Decimal { precision, scale } if invalid_decimal(*precision, *scale) => {
             Some("decimal precision must be positive and cover the scale".into())
         }
         SqlType::Time { precision } | SqlType::Timestamp { precision, .. } if *precision > 9 => {

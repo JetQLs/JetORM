@@ -26,3 +26,7 @@ sea-orm.workspace = true
 [[bench]]
 name = "query_build"
 harness = false
+
+[[bench]]
+name = "feature_build"
+harness = false

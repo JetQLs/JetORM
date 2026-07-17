@@ -49,6 +49,32 @@ pub enum ApplyError {
         /// Missing constraint name.
         name: String,
     },
+    /// A created enum type already exists.
+    EnumExists {
+        /// Type name.
+        name: String,
+    },
+    /// A referenced enum type does not exist.
+    EnumMissing {
+        /// Type name.
+        name: String,
+    },
+    /// An appended enum variant already exists.
+    EnumVariantExists {
+        /// Type name.
+        name: String,
+        /// The repeated variant.
+        variant: String,
+    },
+    /// A dropped enum type is still used by a column.
+    EnumInUse {
+        /// Type name.
+        name: String,
+        /// Table owning the using column.
+        table: TableName,
+        /// The using column.
+        column: String,
+    },
     /// A dropped table or column is still referenced by a foreign key.
     ///
     /// Mirrors the database, where such a drop fails outright; the
@@ -83,6 +109,22 @@ impl fmt::Display for ApplyError {
             Self::ForeignKeyMissing { table, name } => {
                 write!(formatter, "foreign key {name} on {table} does not exist")
             }
+            Self::EnumExists { name } => write!(formatter, "enum type {name} already exists"),
+            Self::EnumMissing { name } => write!(formatter, "enum type {name} does not exist"),
+            Self::EnumVariantExists { name, variant } => {
+                write!(
+                    formatter,
+                    "enum type {name} already has variant {variant:?}"
+                )
+            }
+            Self::EnumInUse {
+                name,
+                table,
+                column,
+            } => write!(
+                formatter,
+                "enum type {name} is still used by {table}.{column}"
+            ),
             Self::StillReferenced {
                 table,
                 referencing_table,
@@ -347,6 +389,45 @@ impl SchemaSet {
                         table: table.clone(),
                         name: name.clone(),
                     });
+                }
+                Ok(())
+            }
+            SchemaChange::CreateEnum { name, variants } => {
+                if self.enum_variants(name).is_some() {
+                    return Err(ApplyError::EnumExists { name: name.clone() });
+                }
+                self.enums_mut().insert(name.clone(), variants.clone());
+                Ok(())
+            }
+            SchemaChange::AddEnumVariant { name, variant } => {
+                let Some(variants) = self.enums_mut().get_mut(name) else {
+                    return Err(ApplyError::EnumMissing { name: name.clone() });
+                };
+                if variants.contains(variant) {
+                    return Err(ApplyError::EnumVariantExists {
+                        name: name.clone(),
+                        variant: variant.clone(),
+                    });
+                }
+                variants.push(variant.clone());
+                Ok(())
+            }
+            SchemaChange::DropEnum { name } => {
+                // The database refuses to drop a type in use; the model
+                // mirrors that so replay fails where the server would.
+                for table in self.tables() {
+                    for column in table.columns() {
+                        if column.type_name() == Some(name.as_str()) {
+                            return Err(ApplyError::EnumInUse {
+                                name: name.clone(),
+                                table: table.name().clone(),
+                                column: column.name().to_owned(),
+                            });
+                        }
+                    }
+                }
+                if self.enums_mut().remove(name).is_none() {
+                    return Err(ApplyError::EnumMissing { name: name.clone() });
                 }
                 Ok(())
             }

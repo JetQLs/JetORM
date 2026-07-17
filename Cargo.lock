@@ -1909,6 +1909,7 @@ dependencies = [
  "jetorm-entity",
  "jetorm-executor",
  "jetorm-query",
+ "jetorm-schema",
  "rust_decimal",
  "serde",
  "serde_json",

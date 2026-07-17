@@ -1,5 +1,6 @@
 use crate::error::DecodeError;
 use crate::meta::{ColumnMeta, TableMeta};
+use crate::relation::EnumMeta;
 use crate::relation::ForeignKeyRef;
 use crate::value::{SqlValue, Value};
 
@@ -28,6 +29,13 @@ pub trait Entity: Copy + 'static {
     /// these into `FOREIGN KEY` constraints. Defaulted so hand-written
     /// entities without constraints need not mention it.
     const FOREIGN_KEYS: &'static [ForeignKeyRef] = &[];
+
+    /// Named database types this entity's columns require.
+    ///
+    /// One entry per native-enum column, possibly repeating a type used by
+    /// several columns; schema tooling deduplicates by name. Defaulted so
+    /// hand-written entities need not mention it.
+    const ENUMS: &'static [EnumMeta] = &[];
 }
 
 /// Positional conversion between a row struct and runtime values.

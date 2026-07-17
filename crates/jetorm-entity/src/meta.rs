@@ -92,6 +92,7 @@ pub struct ColumnMeta {
     name: &'static str,
     rust_name: &'static str,
     column_type: ColumnType,
+    type_name: Option<&'static str>,
     nullable: bool,
     primary_key: bool,
     auto_increment: bool,
@@ -106,11 +107,25 @@ impl ColumnMeta {
             name,
             rust_name,
             column_type,
+            type_name: None,
             nullable: false,
             primary_key: false,
             auto_increment: false,
             unique: false,
         }
+    }
+
+    /// Clones this metadata backed by a named database type.
+    #[must_use]
+    pub const fn with_type_name(mut self, type_name: Option<&'static str>) -> Self {
+        self.type_name = type_name;
+        self
+    }
+
+    /// Returns the named database type backing this column, when any.
+    #[must_use]
+    pub const fn type_name(&self) -> Option<&'static str> {
+        self.type_name
     }
 
     /// Clones this metadata allowing SQL `NULL` values.

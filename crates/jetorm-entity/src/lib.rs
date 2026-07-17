@@ -34,5 +34,5 @@ pub use entity::{Column, Entity, KeyedEntity, Model, NonNullColumn, SingleKeyEnt
 pub use error::{DecodeError, ValueTypeMismatch};
 pub use json::Json;
 pub use meta::{ColumnMeta, ColumnType, TableMeta};
-pub use relation::{ForeignKeyMeta, ForeignKeyRef, Inverse, ReferentialAction, Relation};
+pub use relation::{EnumMeta, ForeignKeyMeta, ForeignKeyRef, Inverse, ReferentialAction, Relation};
 pub use value::{SqlValue, Value};

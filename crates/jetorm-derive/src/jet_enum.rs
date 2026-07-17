@@ -13,23 +13,43 @@ use syn::{Data, DeriveInput, Fields, LitStr, Path};
 use crate::attrs;
 use crate::expand::{snake_case, unraw};
 
-fn parse_crate_path(input: &DeriveInput) -> syn::Result<Path> {
+struct EnumAttrs {
+    crate_path: Path,
+    /// Database type name for a native enum; `None` stays string-backed.
+    native: Option<String>,
+}
+
+fn parse_container(input: &DeriveInput) -> syn::Result<EnumAttrs> {
     let mut crate_path = None;
+    let mut native = None;
     for attribute in attrs::jet_attributes(&input.attrs) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("crate_path") {
                 let literal = meta.value()?.parse::<LitStr>()?;
                 crate_path = Some(literal.parse::<Path>()?);
                 Ok(())
+            } else if meta.path.is_ident("native") {
+                let literal = meta.value()?.parse::<LitStr>()?;
+                if literal.value().is_empty() {
+                    return Err(syn::Error::new(
+                        literal.span(),
+                        "the native type name must not be empty",
+                    ));
+                }
+                native = Some(literal.value());
+                Ok(())
             } else {
-                Err(meta.error("unknown container attribute; expected `crate_path`"))
+                Err(meta.error("unknown container attribute; expected `native` or `crate_path`"))
             }
         })?;
     }
-    match crate_path {
-        Some(path) => Ok(path),
-        None => Ok(syn::parse_str::<Path>("::jetorm")?),
-    }
+    Ok(EnumAttrs {
+        crate_path: match crate_path {
+            Some(path) => path,
+            None => syn::parse_str::<Path>("::jetorm")?,
+        },
+        native,
+    })
 }
 
 /// Stored-name override parsed from a variant's `#[jet(...)]` attribute.
@@ -75,7 +95,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         ));
     }
 
-    let cr = parse_crate_path(input)?;
+    let container = parse_container(input)?;
+    let cr = &container.crate_path;
     let enum_ident = &input.ident;
 
     let mut seen = std::collections::BTreeMap::new();
@@ -109,10 +130,19 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         names.push(stored);
     }
 
+    let native_consts = container.native.as_ref().map(|name| {
+        quote! {
+            const TYPE_NAME: ::core::option::Option<&'static str> =
+                ::core::option::Option::Some(#name);
+            const ENUM_VARIANTS: &'static [&'static str] = &[#(#names),*];
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl #cr::SqlValue for #enum_ident {
             const COLUMN_TYPE: #cr::ColumnType = #cr::ColumnType::Text;
+            #native_consts
 
             fn into_value(self) -> #cr::Value {
                 #cr::Value::Text(

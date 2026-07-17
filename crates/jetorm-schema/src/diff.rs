@@ -109,6 +109,28 @@ pub enum SchemaChange {
         /// Constraint name.
         name: String,
     },
+    /// Creates one named enum type.
+    CreateEnum {
+        /// Type name.
+        name: String,
+        /// Variants in declaration order.
+        variants: Vec<String>,
+    },
+    /// Appends one variant to an existing enum type.
+    ///
+    /// Appending is the only in-place evolution the database offers;
+    /// removal or reordering drops and recreates the type.
+    AddEnumVariant {
+        /// Type name.
+        name: String,
+        /// The appended variant.
+        variant: String,
+    },
+    /// Drops one named enum type.
+    DropEnum {
+        /// Type name.
+        name: String,
+    },
 }
 
 impl SchemaChange {
@@ -135,19 +157,25 @@ impl SchemaChange {
             // Existing rows can violate a new constraint; dropping one
             // cannot fail and loses no data.
             Self::AddForeignKey { .. } => true,
+            // Dropping a type fails while any column uses it; recreation
+            // paths rewrite tables.
+            Self::DropEnum { .. } => true,
             Self::CreateTable(_)
             | Self::RenameTable { .. }
             | Self::RenameColumn { .. }
-            | Self::DropForeignKey { .. } => false,
+            | Self::DropForeignKey { .. }
+            | Self::CreateEnum { .. }
+            | Self::AddEnumVariant { .. } => false,
         }
     }
 
-    /// Returns the table this change applies to.
+    /// Returns the table this change applies to; enum-type changes apply
+    /// to none.
     #[must_use]
-    pub fn table(&self) -> &TableName {
+    pub fn table(&self) -> Option<&TableName> {
         match self {
-            Self::CreateTable(table) => table.name(),
-            Self::DropTable(table) | Self::RenameTable { from: table, .. } => table,
+            Self::CreateTable(table) => Some(table.name()),
+            Self::DropTable(table) | Self::RenameTable { from: table, .. } => Some(table),
             Self::AddColumn { table, .. }
             | Self::DropColumn { table, .. }
             | Self::RenameColumn { table, .. }
@@ -157,7 +185,8 @@ impl SchemaChange {
             | Self::SetAutoIncrement { table, .. }
             | Self::SetPrimaryKey { table, .. }
             | Self::AddForeignKey { table, .. }
-            | Self::DropForeignKey { table, .. } => table,
+            | Self::DropForeignKey { table, .. } => Some(table),
+            Self::CreateEnum { .. } | Self::AddEnumVariant { .. } | Self::DropEnum { .. } => None,
         }
     }
 }
@@ -237,6 +266,13 @@ impl fmt::Display for SchemaChange {
             Self::DropForeignKey { table, name } => {
                 write!(formatter, "drop foreign key {name} on {table}")
             }
+            Self::CreateEnum { name, variants } => {
+                write!(formatter, "create enum {name} ({})", variants.join(", "))
+            }
+            Self::AddEnumVariant { name, variant } => {
+                write!(formatter, "add enum variant {name}.{variant}")
+            }
+            Self::DropEnum { name } => write!(formatter, "drop enum {name}"),
         }
     }
 }
@@ -449,9 +485,58 @@ pub fn diff(current: &SchemaSet, target: &SchemaSet) -> SchemaDiff {
         }
     }
 
-    let mut ordered = foreign_key_drops;
+    // Enum types bracket the whole set: a column can only take a type
+    // that exists, and a type can only drop once nothing uses it.
+    let mut enum_creates = Vec::new();
+    let mut enum_drops = Vec::new();
+    for (name, target_variants) in target.enums() {
+        match current.enum_variants(name) {
+            None => enum_creates.push(SchemaChange::CreateEnum {
+                name: name.to_owned(),
+                variants: target_variants.to_vec(),
+            }),
+            Some(current_variants) if current_variants == target_variants => {}
+            Some(current_variants) => {
+                // Appended variants evolve in place; anything else — a
+                // removal or reorder — recreates the type.
+                if target_variants.len() > current_variants.len()
+                    && target_variants[..current_variants.len()] == *current_variants
+                {
+                    for variant in &target_variants[current_variants.len()..] {
+                        enum_creates.push(SchemaChange::AddEnumVariant {
+                            name: name.to_owned(),
+                            variant: variant.clone(),
+                        });
+                    }
+                } else {
+                    // Recreation must drop first, and dropping fails while
+                    // any column uses the type — an honest apply-time
+                    // failure directing the author to a hand-written
+                    // migration, since a silent rewrite would guess.
+                    enum_creates.push(SchemaChange::DropEnum {
+                        name: name.to_owned(),
+                    });
+                    enum_creates.push(SchemaChange::CreateEnum {
+                        name: name.to_owned(),
+                        variants: target_variants.to_vec(),
+                    });
+                }
+            }
+        }
+    }
+    for (name, _) in current.enums() {
+        if target.enum_variants(name).is_none() {
+            enum_drops.push(SchemaChange::DropEnum {
+                name: name.to_owned(),
+            });
+        }
+    }
+
+    let mut ordered = enum_creates;
+    ordered.append(&mut foreign_key_drops);
     ordered.append(&mut changes);
     ordered.append(&mut foreign_key_adds);
+    ordered.append(&mut enum_drops);
     let changes = ordered;
 
     for dropped in current.tables() {

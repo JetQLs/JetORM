@@ -123,6 +123,18 @@ pub trait SqlValue: Sized {
     /// Whether this Rust type itself models SQL `NULL` (`Option<T>`).
     const NULLABLE: bool = false;
 
+    /// Named database type backing this Rust type, when one exists.
+    ///
+    /// A native enum names its `CREATE TYPE`; everything else uses the
+    /// dialect's spelling of [`SqlValue::COLUMN_TYPE`].
+    const TYPE_NAME: Option<&'static str> = None;
+
+    /// Variant names of a native enum type, in declaration order.
+    ///
+    /// Declaration order is semantic: the database sorts enum values by
+    /// it, and variants may only be appended.
+    const ENUM_VARIANTS: &'static [&'static str] = &[];
+
     /// Converts the Rust value into the runtime value currency.
     fn into_value(self) -> Value;
 
@@ -178,6 +190,8 @@ where
 {
     const COLUMN_TYPE: ColumnType = T::COLUMN_TYPE;
     const NULLABLE: bool = true;
+    const TYPE_NAME: Option<&'static str> = T::TYPE_NAME;
+    const ENUM_VARIANTS: &'static [&'static str] = T::ENUM_VARIANTS;
 
     fn into_value(self) -> Value {
         match self {

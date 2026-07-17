@@ -78,8 +78,8 @@ mod projection;
 mod select;
 
 pub use aggregate::{
-    Aggregate, AggregateFunction, AggregateList, AggregateSpec, Averageable, Comparable, GroupBy,
-    GroupedSelect, Summable, avg, count_rows, max, min, sum,
+    Aggregate, AggregateFunction, AggregateList, AggregateRef, AggregateSpec, Averageable,
+    Comparable, GroupBy, GroupedSelect, HavingExpr, Summable, avg, count_rows, max, min, sum,
 };
 pub use behavior::Exists;
 pub use cursor::{Cursor, CursorPage};
@@ -89,3 +89,21 @@ pub use lowering::LoweringError;
 pub use mutation::{Delete, EntityMutation, Insert, Returning, Update};
 pub use projection::{ColumnList, Projected};
 pub use select::{CacheableQuery, CountQuery, EntityQuery, QueryShape, Select};
+
+/// Typing facts every [`jetorm_entity::SqlValue`] carries, spelled as a
+/// separate trait so generic code can read them without naming the value.
+#[doc(hidden)]
+pub trait SqlValueTyping {
+    /// Canonical column type of the Rust type.
+    const COLUMN_TYPE_OF: jetorm_entity::ColumnType;
+    /// Whether the Rust type itself models SQL `NULL`.
+    const NULLABLE_OF: bool;
+}
+
+impl<T> SqlValueTyping for T
+where
+    T: jetorm_entity::SqlValue,
+{
+    const COLUMN_TYPE_OF: jetorm_entity::ColumnType = T::COLUMN_TYPE;
+    const NULLABLE_OF: bool = T::NULLABLE;
+}

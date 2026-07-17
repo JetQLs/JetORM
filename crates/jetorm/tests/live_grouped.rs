@@ -118,5 +118,21 @@ async fn groups_aggregate_at_their_promoted_types() {
         ]
     );
 
+    // HAVING keeps only groups whose aggregates qualify: customers with
+    // at least two orders totalling more than five items.
+    let bulk = OrderEntity::find()
+        .group_by((order::Customer,))
+        .select_agg((count_rows(), sum(order::Quantity)))
+        .having(|(orders, quantity)| orders.ge(2).and(quantity.gt(4)))
+        .order_by_keys()
+        .all(&db)
+        .await
+        .expect("having query runs");
+    assert_eq!(
+        bulk,
+        [("alice".to_owned(), (2, 5)), ("bob".to_owned(), (2, 5))],
+        "carol has one order and drops out"
+    );
+
     db.close().await;
 }

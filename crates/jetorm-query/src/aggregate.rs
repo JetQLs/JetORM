@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 
+use afterburner::ir::BinaryOperator;
 use jetorm_entity::{Column, ColumnType, DecodeError, Entity, SqlValue, Value};
 
-use crate::expr::Expr;
+use crate::expr::{Expr, Node, OperandType, Predicate, normalize};
 use crate::projection::ColumnList;
 use crate::select::{QueryShape, Select};
 
@@ -236,6 +238,96 @@ where
 {
 }
 
+/// A typed reference to one aggregate of the grouped output row.
+///
+/// Handed to [`GroupedSelect::having`]'s builder, positioned where the
+/// aggregate sits in the output; comparisons produce `HAVING` predicates
+/// typed at the aggregate's own promoted type.
+#[derive(Clone, Copy, Debug)]
+pub struct AggregateRef<T> {
+    position: usize,
+    output: PhantomData<fn() -> T>,
+}
+
+impl<T> AggregateRef<T>
+where
+    T: SqlValue,
+{
+    fn compare(self, op: BinaryOperator, value: impl Into<T>) -> HavingExpr {
+        HavingExpr {
+            node: Node::Binary {
+                op,
+                left: Box::new(Node::Column(self.position)),
+                right: Box::new(Node::Value {
+                    value: value.into().into_value(),
+                    ty: OperandType::of_value::<T>(),
+                }),
+            },
+        }
+    }
+
+    /// Requires the aggregate to equal the value.
+    pub fn eq(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::Equal, value)
+    }
+
+    /// Requires the aggregate to differ from the value.
+    pub fn ne(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::NotEqual, value)
+    }
+
+    /// Requires the aggregate to be below the value.
+    pub fn lt(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::LessThan, value)
+    }
+
+    /// Requires the aggregate to be at most the value.
+    pub fn le(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::LessThanOrEqual, value)
+    }
+
+    /// Requires the aggregate to exceed the value.
+    pub fn gt(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::GreaterThan, value)
+    }
+
+    /// Requires the aggregate to be at least the value.
+    pub fn ge(self, value: impl Into<T>) -> HavingExpr {
+        self.compare(BinaryOperator::GreaterThanOrEqual, value)
+    }
+}
+
+/// A Boolean predicate over the grouped output row — SQL's `HAVING`.
+#[derive(Debug)]
+#[must_use = "a having expression does nothing until passed to having()"]
+pub struct HavingExpr {
+    pub(crate) node: Node,
+}
+
+impl HavingExpr {
+    /// Requires both conditions.
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            node: Node::Binary {
+                op: BinaryOperator::And,
+                left: Box::new(self.node),
+                right: Box::new(other.node),
+            },
+        }
+    }
+
+    /// Requires either condition.
+    pub fn or(self, other: Self) -> Self {
+        Self {
+            node: Node::Binary {
+                op: BinaryOperator::Or,
+                left: Box::new(self.node),
+                right: Box::new(other.node),
+            },
+        }
+    }
+}
+
 /// A typed list of aggregates, one to four per query.
 pub trait AggregateList<E>
 where
@@ -243,6 +335,12 @@ where
 {
     /// Rust type one aggregate row decodes into.
     type Row;
+
+    /// Typed references to each aggregate, for `HAVING` builders.
+    type Refs;
+
+    /// Builds the references, positioned after `key_width` group keys.
+    fn refs(key_width: usize) -> Self::Refs;
 
     /// Value-independent structure of each aggregate, in output order.
     fn specs(&self) -> Vec<AggregateSpec>;
@@ -261,6 +359,15 @@ where
     T: SqlValue,
 {
     type Row = T;
+
+    type Refs = AggregateRef<T>;
+
+    fn refs(key_width: usize) -> Self::Refs {
+        AggregateRef {
+            position: key_width,
+            output: PhantomData,
+        }
+    }
 
     fn specs(&self) -> Vec<AggregateSpec> {
         vec![AggregateSpec {
@@ -295,6 +402,15 @@ macro_rules! impl_aggregate_list_for_tuple {
             $($output: SqlValue,)+
         {
             type Row = ($($output,)+);
+
+            type Refs = ($(AggregateRef<$output>,)+);
+
+            fn refs(key_width: usize) -> Self::Refs {
+                ($(AggregateRef {
+                    position: key_width + $index,
+                    output: PhantomData,
+                },)+)
+            }
 
             fn specs(&self) -> Vec<AggregateSpec> {
                 vec![$(AggregateSpec {
@@ -349,6 +465,8 @@ where
     pub(crate) select: Select<E>,
     pub(crate) aggregates: Vec<AggregateSpec>,
     pub(crate) order_by_keys: bool,
+    /// Predicate over the grouped output row — SQL's `HAVING`.
+    pub(crate) having: Option<Arc<Predicate>>,
     keys: PhantomData<fn() -> K>,
     output: PhantomData<fn() -> A>,
 }
@@ -374,6 +492,7 @@ where
             select: self.select.clone(),
             aggregates: self.aggregates.clone(),
             order_by_keys: self.order_by_keys,
+            having: self.having.clone(),
             keys: PhantomData,
             output: PhantomData,
         }
@@ -433,6 +552,7 @@ where
             select: self.select,
             aggregates: aggregates.specs(),
             order_by_keys: false,
+            having: None,
             keys: PhantomData,
             output: PhantomData,
         }
@@ -450,6 +570,35 @@ where
     #[must_use]
     pub fn filter(mut self, predicate: Expr<E, bool>) -> Self {
         self.select = self.select.filter(predicate);
+        self
+    }
+
+    /// Restricts fetched groups by their aggregate values — SQL's `HAVING`.
+    ///
+    /// The builder receives one typed reference per aggregate, in tuple
+    /// order, each comparing at the aggregate's own promoted type:
+    ///
+    /// ```ignore
+    /// .select_agg((count_rows(), sum(order::Quantity)))
+    /// .having(|(rows, total)| rows.ge(2).and(total.gt(10)))
+    /// ```
+    ///
+    /// Successive calls combine with SQL `AND`. Values bind after the
+    /// filter's values, in call order.
+    #[must_use]
+    pub fn having(mut self, build: impl FnOnce(A::Refs) -> HavingExpr) -> Self {
+        let expression = build(A::refs(K::indexes().len()));
+        let normalized = normalize(expression.node, &mut self.select.binds);
+        self.having = Some(Arc::new(match self.having.take() {
+            Some(existing) => Predicate::Binary {
+                left: Box::new(
+                    Arc::try_unwrap(existing).unwrap_or_else(|shared| (*shared).clone()),
+                ),
+                op: BinaryOperator::And,
+                right: Box::new(normalized),
+            },
+            None => normalized,
+        }));
         self
     }
 
@@ -495,6 +644,7 @@ where
             K::indexes(),
             self.aggregates.clone(),
             self.order_by_keys,
+            self.having.clone(),
         )
     }
 
